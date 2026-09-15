@@ -99,3 +99,19 @@ export function reviewerRouteChoices(input: {
   for (const route of routesOf(input.allowed)) push(route)
   return out
 }
+
+/**
+ * Filter routes for the picker's list.
+ *
+ * Matching is a case-insensitive substring over the whole `provider/model`
+ * label, so typing `luna` and typing `codex/luna` both narrow to the same row.
+ * An empty (or whitespace-only) query keeps the whole list.
+ * @param routes - candidate labels.
+ * @param query - what the operator typed.
+ * @returns the matching labels, in input order.
+ */
+export function filterRoutes(routes: readonly string[], query: string): readonly string[] {
+  const needle = query.trim().toLowerCase()
+  if (needle.length === 0) return routes
+  return routes.filter(route => route.toLowerCase().includes(needle))
+}

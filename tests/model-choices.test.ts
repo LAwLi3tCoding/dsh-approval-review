@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { reviewerRouteChoices, routesFromDirectory } from '../src/client/model-choices.ts'
+import { filterRoutes, reviewerRouteChoices, routesFromDirectory } from '../src/client/model-choices.ts'
 
 describe('reviewerRouteChoices', () => {
   it('lists the override in force first, then the session model, then allowed routes', () => {
@@ -98,5 +98,24 @@ describe('routesFromDirectory', () => {
     expect(routesFromDirectory(null)).toEqual([])
     expect(routesFromDirectory({ status: 'loading', groups: [] })).toEqual([])
     expect(routesFromDirectory({})).toEqual([])
+  })
+})
+
+describe('filterRoutes', () => {
+  const ROUTES = ['deepseek-official/deepseek-flash', 'openai-codex/gpt-5.6-luna']
+
+  it('keeps everything for an empty query', () => {
+    expect(filterRoutes(ROUTES, '')).toEqual(ROUTES)
+    expect(filterRoutes(ROUTES, '   ')).toEqual(ROUTES)
+  })
+
+  it('matches case-insensitively across provider and model', () => {
+    expect(filterRoutes(ROUTES, 'LUNA')).toEqual(['openai-codex/gpt-5.6-luna'])
+    expect(filterRoutes(ROUTES, 'codex/')).toEqual(['openai-codex/gpt-5.6-luna'])
+    expect(filterRoutes(ROUTES, 'deepseek')).toEqual(['deepseek-official/deepseek-flash'])
+  })
+
+  it('returns nothing when nothing matches, so the picker can say so', () => {
+    expect(filterRoutes(ROUTES, 'nope')).toEqual([])
   })
 })

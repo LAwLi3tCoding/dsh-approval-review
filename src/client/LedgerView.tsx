@@ -15,6 +15,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { ClientAuditRecord, ClientAuditView, ClientRisk } from './types.ts'
 import { resetScrollableAncestorToTop } from './scroll.ts'
+import { ModelPicker } from './ModelPicker.tsx'
 
 /** Props for the ledger tab. */
 export interface LedgerViewProps {
@@ -122,9 +123,6 @@ function Field({ label, children, mono }: {
     </div>
   )
 }
-
-/** Identifies the picker's option list; one Approvals tab renders per session. */
-const MODEL_CHOICES_ID = 'approval-review-model-choices'
 
 /** Merge the base list with the loaded catalog, keeping the base order first. */
 function reviewerRoutesMerge(base: readonly string[], loaded: readonly string[]): readonly string[] {
@@ -251,17 +249,10 @@ function useStartAtTop(root: React.RefObject<HTMLDivElement | null>): void {
 export function LedgerView({ view, zh, runCommand, modelChoices, loadModels }: LedgerViewProps): React.JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null)
   useStartAtTop(rootRef)
-  const [modelDraft, setModelDraft] = useState('')
   const [loadedChoices, setLoadedChoices] = useState<readonly string[] | undefined>(undefined)
   // The base list (override in force + session model) paints immediately; the
-  // catalog replaces it once loaded, so the control is never empty in between.
+  // catalog replaces it once loaded, so the picker is never empty in between.
   const choices = loadedChoices ?? modelChoices ?? []
-  const loadOnce = (): void => {
-    if (loadedChoices !== undefined || loadModels === undefined) return
-    void loadModels().then((routes) => {
-      setLoadedChoices(routes.length === 0 ? (modelChoices ?? []) : reviewerRoutesMerge(modelChoices ?? [], routes))
-    }).catch(() => { setLoadedChoices(modelChoices ?? []) })
-  }
   const records = view?.records ?? []
   const denials = useMemo(() => records.filter(r => r.refused), [records])
   const reviewedCount = useMemo(() => records.filter(r => r.policy === 'ai').length, [records])
@@ -302,45 +293,15 @@ export function LedgerView({ view, zh, runCommand, modelChoices, loadModels }: L
         )}
         {runCommand === undefined ? null : (
           <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-            {/* A datalist input, not a <select>: clicking it lists every model
-                the deployment configures locally, while still allowing an id the
-                catalog does not advertise (catalog membership is advisory). */}
-            <input
-              list={MODEL_CHOICES_ID}
-              value={modelDraft}
-              onFocus={loadOnce}
-              onMouseDown={loadOnce}
-              onChange={event => setModelDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key !== 'Enter' || modelDraft.trim().length === 0) return
-                runCommand(`/approval-review model ${modelDraft.trim()}`)
-                setModelDraft('')
-              }}
-              placeholder={zh ? '选择或输入模型' : 'pick or type a model'}
-              aria-label={zh ? '复核模型' : 'reviewer model'}
-              style={{
-                fontFamily: CODE, fontSize: 11, padding: '2px 6px', width: 210,
-                borderRadius: 6, border: `1px solid ${BORDER}`, background: 'transparent', color: TEXT,
+            <ModelPicker
+              choices={choices}
+              runCommand={runCommand}
+              loadModels={loadModels}
+              zh={zh}
+              onChoicesLoaded={(routes) => {
+                setLoadedChoices(routes.length === 0 ? (modelChoices ?? []) : reviewerRoutesMerge(modelChoices ?? [], routes))
               }}
             />
-            <datalist id={MODEL_CHOICES_ID}>
-              {choices.map(choice => <option key={choice} value={choice} />)}
-            </datalist>
-            <button
-              type="button"
-              disabled={modelDraft.trim().length === 0}
-              onClick={() => {
-                runCommand(`/approval-review model ${modelDraft.trim()}`)
-                setModelDraft('')
-              }}
-              style={{
-                fontSize: 11, padding: '3px 9px', borderRadius: 6,
-                cursor: modelDraft.trim().length === 0 ? 'default' : 'pointer',
-                border: `1px solid ${BORDER}`,
-                color: modelDraft.trim().length === 0 ? MUTED : TEXT,
-                background: 'transparent',
-              }}
-            >{zh ? '应用' : 'apply'}</button>
             <button
               type="button"
               onClick={() => runCommand('/approval-review model default')}
