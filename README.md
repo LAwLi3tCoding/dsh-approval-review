@@ -32,7 +32,7 @@ circuit breaker stops the agent from looping on escalation attempts.
 | **Circuit breaker** | Consecutive and rolling-window denial thresholds, matching Codex's per-turn breaker, after which further requests go to the human chain. |
 | **Budgets** | A per-turn cap on reviewer calls, so a loop cannot bill unlimited reviews. |
 | **One-shot override** | `/approval-review approve [n]` records a human authorization for one retry. The reviewer still decides; it just learns the human authorized it. |
-| **Composer axis** | A `自动审批 · 人工 / AI` chip in the composer tool row, beside the access-mode chip. Like Codex, "who decides" is a separate axis from "how much can be touched", not a fourth sandbox preset. |
+| **Fourth access mode** | An `替我审批` ("approve for me") entry beside 仅可查看 / 工作区内修改 / 完全权限. It shares its sandbox and approval knobs with `workspace-write` on purpose — the difference is WHO answers — so the menu entry itself is the switch. `PermissionPresetService.derive()` checks the recorded selection first, which is what lets the two coexist and stay selected. |
 | **Verdict cache** | Reuses a recent verdict for a byte-identical `tool + arguments`, so a retry loop does not bill a reviewer call each time. Only consulted when `context.turns` is 0, where the verdict really is replayable from the action alone. |
 | **Failure budget** | A per-turn cap on reviewer *failures*, so a broken reviewer cannot be retried without bound while the request waits. |
 | **Audit card** | A session-header card rendering every request with its verdict, risk, rationale, safer-alternative suggestion, reviewer route, timing, and the live budget/breaker state, plus working on/off and one-shot-approve buttons. |

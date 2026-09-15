@@ -24,14 +24,11 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { ReviewCard } from './ReviewCard.tsx'
-import { ReviewToggle } from './ReviewToggle.tsx'
 import { LedgerView } from './LedgerView.tsx'
 import type { ClientAuditView } from './types.ts'
 
 /** Slot entry ids; stable so a redeploy replaces its own rows. */
 export const CARD_SLOT_ID = 'approval-review-card'
-/** Composer toggle entry id. */
-export const TOGGLE_SLOT_ID = 'approval-review-toggle'
 /** Conversation tab entry id. */
 export const VIEW_SLOT_ID = 'approval-review-ledger'
 
@@ -39,12 +36,6 @@ export const VIEW_SLOT_ID = 'approval-review-ledger'
 const CARD_SLOT = 'conversation.session.header.actions'
 /** The conversation tab strip, beside 轨迹 / 上下文 / 费用. */
 const VIEW_SLOT = 'conversation.view'
-/**
- * The composer tool row. `conversation.input.left` is a `list` slot with no
- * owner, which is what lets this sit INSIDE the row beside the access-mode chip
- * rather than above the card (the composer dock renders below the card).
- */
-const TOGGLE_SLOT = 'conversation.input.left'
 
 /**
  * Required client services.
@@ -111,12 +102,6 @@ function ApprovalReviewLedger(props: SessionActionProps & ApprovalReviewInjected
   return LedgerView({ view, zh: preferZh(), runCommand: props.runCommand })
 }
 
-/** Render the composer "who decides" toggle. */
-function ApprovalReviewToggle(props: SessionActionProps & ApprovalReviewInjected): React.JSX.Element {
-  const view = props.useProjection('approvalReview') as ClientAuditView | undefined
-  return ReviewToggle({ view, zh: preferZh(), runCommand: props.runCommand })
-}
-
 /**
  * Register the ledger card and the composer toggle.
  * @param ctx - client Cordis context.
@@ -159,17 +144,6 @@ export function apply(ctx: ClientContext): void {
       inject,
     },
     ApprovalReviewLedger,
-  ))
-
-  ctx.slots.inject(TOGGLE_SLOT, () => ctx.slots.register(
-    {
-      name: TOGGLE_SLOT,
-      id: TOGGLE_SLOT_ID,
-      // Left of the access-mode chip, so the two axes read as a pair.
-      order: -10,
-      inject,
-    },
-    ApprovalReviewToggle,
   ))
 
   ctx.slots.inject(CARD_SLOT, () => ctx.slots.register(
