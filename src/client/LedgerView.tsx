@@ -29,6 +29,11 @@ export interface LedgerViewProps {
    * a free-text id.
    */
   readonly modelChoices?: readonly string[]
+  /**
+   * Loads the locally configured routes on first use. Called when the picker
+   * opens, so the catalog is only fetched when someone actually picks a model.
+   */
+  readonly loadModels?: () => Promise<readonly string[]>
 }
 
 const TEXT = 'var(--dsw-alias-label-primary, #e6edf3)'
@@ -115,6 +120,16 @@ function Field({ label, children, mono }: {
       }}>{children}</span>
     </div>
   )
+}
+
+/** Identifies the picker's option list; one Approvals tab renders per session. */
+const MODEL_CHOICES_ID = 'approval-review-model-choices'
+
+/** Merge the base list with the loaded catalog, keeping the base order first. */
+function reviewerRoutesMerge(base: readonly string[], loaded: readonly string[]): readonly string[] {
+  const out = [...base]
+  for (const route of loaded) if (!out.includes(route)) out.push(route)
+  return out
 }
 
 /** One ledger entry, expanded. */
@@ -211,8 +226,18 @@ function Entry({ record, zh, onApprove, deniedIndex }: {
 }
 
 /** The full ledger tab. */
-export function LedgerView({ view, zh, runCommand, modelChoices }: LedgerViewProps): React.JSX.Element {
+export function LedgerView({ view, zh, runCommand, modelChoices, loadModels }: LedgerViewProps): React.JSX.Element {
   const [modelDraft, setModelDraft] = useState('')
+  const [loadedChoices, setLoadedChoices] = useState<readonly string[] | undefined>(undefined)
+  // The base list (override in force + session model) paints immediately; the
+  // catalog replaces it once loaded, so the control is never empty in between.
+  const choices = loadedChoices ?? modelChoices ?? []
+  const loadOnce = (): void => {
+    if (loadedChoices !== undefined || loadModels === undefined) return
+    void loadModels().then((routes) => {
+      setLoadedChoices(routes.length === 0 ? (modelChoices ?? []) : reviewerRoutesMerge(modelChoices ?? [], routes))
+    }).catch(() => { setLoadedChoices(modelChoices ?? []) })
+  }
   const records = view?.records ?? []
   const denials = useMemo(() => records.filter(r => r.refused), [records])
   const reviewedCount = useMemo(() => records.filter(r => r.policy === 'ai').length, [records])
@@ -253,37 +278,30 @@ export function LedgerView({ view, zh, runCommand, modelChoices }: LedgerViewPro
         )}
         {runCommand === undefined ? null : (
           <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-            {modelChoices !== undefined && modelChoices.length > 0 ? (
-              <select
-                value={modelDraft}
-                onChange={event => setModelDraft(event.target.value)}
-                aria-label={zh ? '复核模型' : 'reviewer model'}
-                style={{
-                  fontFamily: CODE, fontSize: 11, padding: '2px 6px', minWidth: 200,
-                  borderRadius: 6, border: `1px solid ${BORDER}`, background: PANEL, color: TEXT,
-                }}
-              >
-                <option value="">{zh ? '选择复核模型…' : 'choose a reviewer model…'}</option>
-                {modelChoices.map(choice => <option key={choice} value={choice}>{choice}</option>)}
-              </select>
-            ) : (
-              // No published list to pick from: a manual id still beats no lever.
-              <input
-                value={modelDraft}
-                onChange={event => setModelDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key !== 'Enter' || modelDraft.trim().length === 0) return
-                  runCommand(`/approval-review model ${modelDraft.trim()}`)
-                  setModelDraft('')
-                }}
-                placeholder={zh ? '模型 id 或 provider/model' : 'model id or provider/model'}
-                aria-label={zh ? '复核模型' : 'reviewer model'}
-                style={{
-                  fontFamily: CODE, fontSize: 11, padding: '2px 6px', width: 190,
-                  borderRadius: 6, border: `1px solid ${BORDER}`, background: 'transparent', color: TEXT,
-                }}
-              />
-            )}
+            {/* A datalist input, not a <select>: clicking it lists every model
+                the deployment configures locally, while still allowing an id the
+                catalog does not advertise (catalog membership is advisory). */}
+            <input
+              list={MODEL_CHOICES_ID}
+              value={modelDraft}
+              onFocus={loadOnce}
+              onMouseDown={loadOnce}
+              onChange={event => setModelDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter' || modelDraft.trim().length === 0) return
+                runCommand(`/approval-review model ${modelDraft.trim()}`)
+                setModelDraft('')
+              }}
+              placeholder={zh ? '选择或输入模型' : 'pick or type a model'}
+              aria-label={zh ? '复核模型' : 'reviewer model'}
+              style={{
+                fontFamily: CODE, fontSize: 11, padding: '2px 6px', width: 210,
+                borderRadius: 6, border: `1px solid ${BORDER}`, background: 'transparent', color: TEXT,
+              }}
+            />
+            <datalist id={MODEL_CHOICES_ID}>
+              {choices.map(choice => <option key={choice} value={choice} />)}
+            </datalist>
             <button
               type="button"
               disabled={modelDraft.trim().length === 0}

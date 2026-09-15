@@ -31,7 +31,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { LedgerView } from './LedgerView.tsx'
 import { installAccessModeGlyph } from './access-mode-glyph.ts'
-import { reviewerRouteChoices } from './model-choices.ts'
+import { reviewerRouteChoices, routesFromDirectory } from './model-choices.ts'
 import type { ClientAuditView } from './types.ts'
 
 /** Slot entry id; stable so a redeploy replaces its own row. */
@@ -66,6 +66,24 @@ interface CommandRemoteFace {
   }
 }
 
+/**
+ * The client model directory this harness publishes for model picking.
+ *
+ * Read structurally and OPTIONALLY: it is what the composer's model seat and the
+ * `/model` picker use, so it is the deployment's own answer to "which models are
+ * configured here". `subagentModelSelectionPolicy` would be the tighter list,
+ * but it is host-only (no `wire`), so it never reaches the browser.
+ */
+interface ModelDirectoriesFace {
+  /**
+   * @param sessionId - the session whose catalog to load.
+   * @returns the loaded directory snapshot.
+   */
+  directoryFor(sessionId: SessionId): {
+    load(): Promise<{ readonly groups?: unknown }>
+  }
+}
+
 /** Props the framework supplies to a session-scoped slot entry. */
 interface SessionActionProps {
   /** Host-computed projection values addressed by key. */
@@ -91,6 +109,11 @@ export interface ApprovalReviewInjected {
    * @returns null when the host admitted it; a failure line otherwise.
    */
   runCommand: (line: string) => Promise<string | null>
+  /**
+   * Load the locally configured reviewer routes, as `provider/model`.
+   * @returns the catalog's routes, or an empty list when unavailable.
+   */
+  loadModels: () => Promise<readonly string[]>
 }
 
 /** Reviewer routes this deployment offers, read from its own projections. */
@@ -113,6 +136,7 @@ function ApprovalReviewLedger(props: SessionActionProps & ApprovalReviewInjected
     zh: preferZh(),
     runCommand: props.runCommand,
     modelChoices: reviewerChoices(props, current),
+    loadModels: props.loadModels,
   })
 }
 
@@ -134,10 +158,29 @@ export function apply(ctx: ClientContext): void {
   const remoteOf = (): CommandRemoteFace['commands'] | undefined =>
     (ctx as unknown as { remote?: CommandRemoteFace }).remote?.commands
 
+  /**
+   * The model directory, resolved LAZILY for the same reason the command remote
+   * is: this client half mounts before every service it may use is up, and a
+   * captured `undefined` would permanently disable the picker.
+   */
+  const directoriesOf = (): ModelDirectoriesFace | undefined =>
+    (ctx as unknown as { get?: (name: string) => unknown }).get?.('modelDirectories') as ModelDirectoriesFace | undefined
+
   /** The per-session business face the tab's seat uses. */
   // The seat hands the session id as a plain string; the command remote takes
   // the branded id, so the brand is reasserted at this one boundary.
   const inject = (rawSessionId: string): ApprovalReviewInjected => ({
+    loadModels: async () => {
+      const directories = directoriesOf()
+      if (directories === undefined) return []
+      try {
+        // The catalog load is shared and cached by the harness, so opening the
+        // picker costs nothing after the composer's own model seat has loaded.
+        return routesFromDirectory(await directories.directoryFor(rawSessionId as SessionId).load())
+      } catch {
+        return []
+      }
+    },
     runCommand: async (line: string) => {
       const commands = remoteOf()
       if (commands === undefined) return 'the command remote is not mounted in this client'

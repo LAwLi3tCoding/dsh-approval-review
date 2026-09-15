@@ -37,6 +37,37 @@ function routesOf(value: unknown): readonly string[] {
 }
 
 /**
+ * Every route in a client model-directory snapshot (`modelDirectories` service).
+ *
+ * This is the SAME catalog the composer's model seat and the `/model` picker
+ * read, so the reviewer picker offers exactly the models the deployment
+ * configures locally — minus anything the catalog failed to load, which it
+ * reports separately and which we deliberately do not guess at.
+ * @param value - the directory state returned by `directoryFor(session).load()`.
+ * @returns distinct `provider/model` labels in catalog order.
+ */
+export function routesFromDirectory(value: unknown): readonly string[] {
+  if (typeof value !== 'object' || value === null) return []
+  const groups = (value as { readonly groups?: unknown }).groups
+  if (!Array.isArray(groups)) return []
+  const out: string[] = []
+  for (const group of groups) {
+    if (typeof group !== 'object' || group === null) continue
+    const id = (group as { readonly id?: unknown }).id
+    const models = (group as { readonly models?: unknown }).models
+    if (typeof id !== 'string' || id.length === 0 || !Array.isArray(models)) continue
+    for (const model of models) {
+      if (typeof model !== 'object' || model === null) continue
+      const modelId = (model as { readonly id?: unknown }).id
+      if (typeof modelId !== 'string' || modelId.length === 0) continue
+      const route = `${id}/${modelId}`
+      if (!out.includes(route)) out.push(route)
+    }
+  }
+  return out
+}
+
+/**
  * Build the picker's option list.
  *
  * Order is deliberate: the session override in force first (so a route chosen

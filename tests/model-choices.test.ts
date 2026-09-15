@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { reviewerRouteChoices } from '../src/client/model-choices.ts'
+import { reviewerRouteChoices, routesFromDirectory } from '../src/client/model-choices.ts'
 
 describe('reviewerRouteChoices', () => {
   it('lists the override in force first, then the session model, then allowed routes', () => {
@@ -64,5 +64,39 @@ describe('reviewerRouteChoices', () => {
     })
     expect(choices[0]).toBe('openai-codex/gpt-5.6-terra')
     expect(choices).toContain('deepseek-official/deepseek-flash')
+  })
+})
+
+describe('routesFromDirectory', () => {
+  it('flattens the client model catalog into provider/model routes', () => {
+    expect(routesFromDirectory({
+      groups: [
+        { id: 'deepseek-official', models: [{ id: 'deepseek-flash' }, { id: 'deepseek-v4-pro' }] },
+        { id: 'openai-codex', models: [{ id: 'gpt-5.6-luna' }] },
+      ],
+    })).toEqual([
+      'deepseek-official/deepseek-flash',
+      'deepseek-official/deepseek-v4-pro',
+      'openai-codex/gpt-5.6-luna',
+    ])
+  })
+
+  it('ignores failed or malformed groups instead of guessing', () => {
+    expect(routesFromDirectory({
+      groups: [
+        { id: 'p', models: [{ id: 'm' }, { id: '' }, {}, null] },
+        { id: '', models: [{ id: 'm' }] },
+        { models: [{ id: 'm' }] },
+        null,
+      ],
+      failures: [{ provider: 'broken', error: 'catalog failed' }],
+    })).toEqual(['p/m'])
+  })
+
+  it('returns nothing for an unloaded or absent directory', () => {
+    expect(routesFromDirectory(undefined)).toEqual([])
+    expect(routesFromDirectory(null)).toEqual([])
+    expect(routesFromDirectory({ status: 'loading', groups: [] })).toEqual([])
+    expect(routesFromDirectory({})).toEqual([])
   })
 })
