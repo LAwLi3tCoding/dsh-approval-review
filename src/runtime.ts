@@ -99,6 +99,18 @@ export class ReviewRuntime {
     return this.config.context.turns === 0 && this.cache.enabled
   }
 
+  /**
+   * The reviewer model actually in force for one session: the durable
+   * `/approval-review model <id>` override when set, else the deployment default.
+   * @param session - the session being reviewed for.
+   * @returns the model id, or undefined to inherit the session's own model.
+   */
+  reviewerModelFor(session: Session): string | undefined {
+    const override = this.auditStates.get(session)?.modelOverride
+    const chosen = override ?? this.config.reviewer.model
+    return chosen === undefined || chosen.length === 0 ? undefined : chosen
+  }
+
   /** Reviewer failures recorded in the open turn, for the status report. */
   failuresThisTurn(session: Session): number {
     return this.sessions.failuresThisTurn(session)
@@ -146,6 +158,7 @@ export class ReviewRuntime {
       enabledByDefault: this.config.enabledByDefault,
       maxReviewsPerTurn: this.config.budget.maxReviewsPerTurn,
       breakerTrips: state => breaker(state.denialsStreak, state.window),
+      defaultReviewerModel: this.config.reviewer.model ?? '',
     })
   }
 
@@ -158,6 +171,7 @@ export class ReviewRuntime {
         enabledByDefault: this.config.enabledByDefault,
         maxReviewsPerTurn: this.config.budget.maxReviewsPerTurn,
         breakerTrips: live.circuitOpen,
+        defaultReviewerModel: this.config.reviewer.model ?? '',
       }),
       consecutiveDenials: live.consecutiveDenials,
       pendingOverrides: live.pendingOverrides,
@@ -172,6 +186,35 @@ export class ReviewRuntime {
    */
   recordOverride(session: Session, override: { toolName: string; at: number; reviewId?: string }): void {
     this.sessions.addOverride(session, override, this.limits)
+  }
+
+
+  /**
+   * Whether the session's ACTIVE access-mode preset is the one that turns this
+   * plugin on.
+   *
+   * This is what makes the access-mode entry a real switch rather than a label:
+   * the plugin refuses to claim any request while the session sits on a different
+   * preset, so picking "工作区内修改" restores the ordinary human prompt even
+   * though both presets carry the same (sandbox, approval) knobs.
+   * @param session - the session whose active preset is read.
+   * @returns true when this plugin may claim requests.
+   */
+  private presetAllows(session: Session): boolean {
+    if (this.config.reviewerPreset.length === 0) return true
+    const registry = this.ctx.get('sessionProjections')
+    if (registry === undefined) return true
+    const snapshot = registry.snapshot(session)
+    // Read structurally: the `permissions` unit belongs to another package, and
+    // this plugin must build without depending on its type outlet.
+    const permissions = (snapshot.values as Record<string, unknown>)['permissions'] as
+      | { readonly currentValue?: unknown }
+      | undefined
+    const current = permissions?.currentValue
+    // No projection yet (first step of a session) is not evidence of a mismatch;
+    // the recorded selection lands before any approval can be raised.
+    if (typeof current !== 'string') return true
+    return current === this.config.reviewerPreset
   }
 
   /**
@@ -189,6 +232,7 @@ export class ReviewRuntime {
     const session = req.agent.session
     if (!this.config.enabled) return await next()
     if (!this.isEnabled(session)) return await next()
+    if (!this.presetAllows(session)) return await next()
 
     const rawArguments = this.argumentsFor(session, req.callId)
     // Policy rules match the RAW arguments: a rule that denies a call containing
@@ -325,7 +369,7 @@ export class ReviewRuntime {
     const result = this.config.reviewer.mode === 'subagent'
       ? await runSubagentReviewer(this.ctx, {
         ...this.config.reviewer.provider === undefined ? {} : { provider: this.config.reviewer.provider },
-        ...this.config.reviewer.model === undefined ? {} : { model: this.config.reviewer.model },
+        ...this.reviewerModelFor(session) === undefined ? {} : { model: this.reviewerModelFor(session)! },
         reviewerProvider: this.config.reviewer.subagentProvider,
         reviewerTools: this.config.reviewer.tools,
         timeoutMs: this.config.reviewer.timeoutMs,

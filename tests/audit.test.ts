@@ -241,14 +241,14 @@ describe('applyAuditEvent', () => {
 
 describe('auditView', () => {
   it('applies the deployment switch default when the log carries no override', () => {
-    const view = auditView(initAuditState(), { enabledByDefault: false, maxReviewsPerTurn: 7, breakerTrips: false })
+    const view = auditView(initAuditState(), { enabledByDefault: false, maxReviewsPerTurn: 7, breakerTrips: false, defaultReviewerModel: '' })
     expect(view.enabled).toBe(false)
     expect(view.maxReviewsPerTurn).toBe(7)
   })
 
   it('prefers the logged override over the default', () => {
     const state = fold([event('command/run', { commandId: 'x', name: COMMAND_NAME, args: 'off', source: 'user' })])
-    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 7, breakerTrips: false })
+    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 7, breakerTrips: false, defaultReviewerModel: '' })
     expect(view.enabled).toBe(false)
   })
 
@@ -258,7 +258,7 @@ describe('auditView', () => {
       event('approval/asked', { id: 'a', toolName: 'bash' }),
       event('approval/decided', { id: 'a', outcome: 'rejected' }),
     ])
-    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 7, breakerTrips: true })
+    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 7, breakerTrips: true, defaultReviewerModel: '' })
     expect(view.refused).toBe(1)
     expect(view.total).toBe(1)
     expect(view.consecutiveDenials).toBe(1)
@@ -317,5 +317,44 @@ describe('review marker round-trip', () => {
     const marker = formatReviewMarker({ reason: 'line one\nline two' })
     expect(marker).not.toContain('line one\nline two')
     expect(parseReviewMarker(marker)?.reason).toBe('line one line two')
+  })
+})
+
+describe('reviewer-model override', () => {
+  const withModel = (args: string) =>
+    fold([event('command/run', { commandId: 'x', name: COMMAND_NAME, args, source: 'user' })])
+
+  it('records a durable model override from the command', () => {
+    const state = withModel('model deepseek-chat')
+    expect(state.modelOverride).toBe('deepseek-chat')
+    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerModel: 'default-model' })
+    expect(view.reviewerModel).toBe('deepseek-chat')
+  })
+
+  it('falls back to the deployment default without an override', () => {
+    const view = auditView(initAuditState(), { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerModel: 'default-model' })
+    expect(view.reviewerModel).toBe('default-model')
+  })
+
+  it('reports an empty string when nothing is configured', () => {
+    const view = auditView(initAuditState(), { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerModel: '' })
+    expect(view.reviewerModel).toBe('')
+  })
+
+  it('clears the override with `model default` and drops the key', () => {
+    const set = withModel('model some-model')
+    const cleared = applyAuditEvent(set, event('command/run', { commandId: 'y', name: COMMAND_NAME, args: 'model default', source: 'user' }), DEFAULTS)
+    expect(cleared.modelOverride).toBeUndefined()
+    expect(Object.hasOwn(cleared, 'modelOverride')).toBe(false)
+  })
+
+  it('keeps a model id that contains spaces', () => {
+    expect(withModel('model vendor/some model').modelOverride).toBe('vendor/some model')
+  })
+
+  it('leaves the override alone for an unrelated command', () => {
+    const set = withModel('model m1')
+    const other = applyAuditEvent(set, event('command/run', { commandId: 'y', name: COMMAND_NAME, args: 'status', source: 'user' }), DEFAULTS)
+    expect(other.modelOverride).toBe('m1')
   })
 })

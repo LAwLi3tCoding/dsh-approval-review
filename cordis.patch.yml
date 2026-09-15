@@ -78,3 +78,43 @@
         # it off costs the model its explanation AND the card its reason line.
         feedReasonToModel: true
         language: en
+
+# --- "Approve for me" as a PEER access-mode option -------------------------
+#
+# The access-mode menu is data-driven from this table, so a fourth entry shows up
+# beside 仅可查看 / 工作区内修改 / 完全权限 with no client change.
+#
+# Why this works even though the bundle is identical to `workspace-write`:
+# `PermissionPresetService.derive()` checks the RECORDED selection first and
+# returns it when its knobs still match, so the remembered preset key wins over
+# the first table match. Selecting "Approve for me" therefore stays selected.
+#
+# An id-targeted override REPLACES the whole row, so the shipped three entries
+# must be restated here verbatim.
+- id: permission
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+        name: 仅可查看
+        description: 只能读取，任何修改都需要批准。
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+        name: 工作区内修改
+        description: 可在工作区与临时目录内修改；更宽的操作需要批准。
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+        name: 完全权限
+        description: 不受限的文件与网络访问，不再弹审批。
+      # The fourth peer option. Its knobs deliberately match `workspace-write`:
+      # the difference is WHO answers the approval — this plugin's reviewer
+      # instead of a human prompt. `dsh-approval-review` only claims requests
+      # while this preset is the active one.
+      approve-for-me:
+        sandbox: workspace-write
+        approval: ask
+        name: 替我审批
+        description: 与"工作区内修改"相同的边界，但需要批准的动作先交给复核模型，只有危险或不确定的才转人工。

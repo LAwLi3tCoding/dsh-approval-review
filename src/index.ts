@@ -64,6 +64,7 @@ function emptyView(config: ConfigShape): ReturnType<typeof auditView> {
       enabledByDefault: config.enabledByDefault,
       maxReviewsPerTurn: config.budget.maxReviewsPerTurn,
       breakerTrips: false,
+      defaultReviewerModel: config.reviewer.model ?? '',
     },
   )
 }
@@ -126,8 +127,8 @@ export function apply(ctx: Context, config: ConfigShape): void {
           const cache = runtime.stats()
           const lines = [
             zh
-              ? `自动审批：${view.enabled ? '开启' : '关闭'}｜复核模式 ${config.reviewer.mode}${config.reviewer.mode === 'subagent' ? ` (${config.reviewer.subagentProvider})` : ''}｜模型 ${config.reviewer.model ?? '继承会话'}`
-              : `Automatic approval review: ${view.enabled ? 'on' : 'off'} | reviewer ${config.reviewer.mode}${config.reviewer.mode === 'subagent' ? ` (${config.reviewer.subagentProvider})` : ''} | model ${config.reviewer.model ?? 'inherit session'}`,
+              ? `自动审批：${view.enabled ? '开启' : '关闭'}｜复核模式 ${config.reviewer.mode}${config.reviewer.mode === 'subagent' ? ` (${config.reviewer.subagentProvider})` : ''}｜模型 ${view.reviewerModel.length > 0 ? view.reviewerModel : '继承会话'}`
+              : `Automatic approval review: ${view.enabled ? 'on' : 'off'} | reviewer ${config.reviewer.mode}${config.reviewer.mode === 'subagent' ? ` (${config.reviewer.subagentProvider})` : ''} | model ${view.reviewerModel.length > 0 ? view.reviewerModel : 'inherit session'}`,
             zh
               ? `本回合：复审 ${view.reviewsThisTurn}/${view.maxReviewsPerTurn}｜复核失败 ${runtime.failuresThisTurn(session)}/${config.maxFailuresPerTurn}｜连续否决 ${view.consecutiveDenials}`
               : `This turn: reviews ${view.reviewsThisTurn}/${view.maxReviewsPerTurn} | reviewer failures ${runtime.failuresThisTurn(session)}/${config.maxFailuresPerTurn} | consecutive denials ${view.consecutiveDenials}`,
@@ -183,12 +184,32 @@ export function apply(ctx: Context, config: ConfigShape): void {
               : `One-shot approval recorded for ${target.toolName}: the next review of that tool carries this human authorization, but the reviewer still decides independently.`,
           }
         }
+        case 'model': {
+          // The durable record is the command/run event itself, exactly like the
+          // on/off switch, so the choice survives resume without extra storage.
+          const requested = args.split(/\s+/u).slice(1).join(' ').trim()
+          if (requested.length === 0) {
+            const current = runtime.liveView(session).reviewerModel
+            return {
+              kind: 'success' as const,
+              text: zh
+                ? `复核模型：${current.length > 0 ? current : '继承会话模型（未覆盖）'}\n用法：/approval-review model <模型 id>｜model default 恢复继承`
+                : `Reviewer model: ${current.length > 0 ? current : 'inherit the session model (no override)'}\nUsage: /approval-review model <id> | model default to inherit again`,
+            }
+          }
+          return {
+            kind: 'success' as const,
+            text: zh
+              ? `复核模型已设为 ${requested}（本会话持久生效）`
+              : `Reviewer model set to ${requested} for this session (durable across resume).`,
+          }
+        }
         default:
           return {
             kind: 'error' as const,
             text: zh
-              ? '用法：/approval-review on|off|status|approve [n]'
-              : 'Usage: /approval-review on|off|status|approve [n]',
+              ? '用法：/approval-review on|off|status|approve [n]|model [id]'
+              : 'Usage: /approval-review on|off|status|approve [n]|model [id]',
           }
       }
     },

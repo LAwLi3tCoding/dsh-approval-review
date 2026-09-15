@@ -45,4 +45,6 @@ export interface ClientAuditView {
   readonly total: number
   readonly refused: number
   readonly pendingOverrides: number
+  /** Reviewer model in force for this session; `''` means inherit the session model. */
+  readonly reviewerModel: string
 }

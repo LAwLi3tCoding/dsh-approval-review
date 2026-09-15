@@ -124,6 +124,13 @@ export interface Config {
   readonly enabled: boolean
   /** Session-start default for the runtime `/approval-review on|off` switch. */
   readonly enabledByDefault: boolean
+  /**
+   * The permission preset that turns this plugin ON. Empty means "always claim",
+   * which suits a deployment that has no such preset. When set, the plugin claims
+   * nothing unless that preset is the session's active one — that is what makes
+   * the access-mode entry the real on/off switch instead of a decorative label.
+   */
+  readonly reviewerPreset: string
   /** Tool-name patterns routed to the reviewer model. */
   readonly reviewTools: string[]
   /** Policy for tools matching no entry in {@link reviewTools}. */
@@ -175,6 +182,10 @@ export const Config: Schema<Config> = Schema.object({
   ),
   enabledByDefault: Schema.boolean().default(true).description(
     'Session-start default for the per-session switch; `/approval-review off` overrides it durably.',
+  ),
+  reviewerPreset: Schema.string().default('approve-for-me').description(
+    'Permission preset that turns auto-approval on. Empty means always claim. Set this to the '
+    + 'preset key you added to `permissionPresets` (see cordis.patch.yml).',
   ),
   reviewTools: Schema.array(Schema.string()).default(['bash', 'pwsh', 'write'])
     .description('Tool-name glob patterns routed to the reviewer model.'),

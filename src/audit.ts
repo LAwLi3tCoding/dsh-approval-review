@@ -109,6 +109,12 @@ export interface AuditView {
   readonly refused: number
   /** One-shot overrides still usable. */
   readonly pendingOverrides: number
+  /**
+   * The reviewer model actually in force for this session: the durable override
+   * when one was set, else the deployment default (`''` = inherit the session
+   * model).
+   */
+  readonly reviewerModel: string
 }
 
 /** Raw projection state; the wire view is derived from it. */
@@ -121,6 +127,8 @@ export interface AuditState {
   readonly turn: number
   readonly step: number
   readonly enabledOverride?: boolean
+  /** Durable per-session reviewer-model override, from `/approval-review model <id>`. */
+  readonly modelOverride?: string
   readonly reviewsThisTurn: number
   readonly denialsStreak: number
   readonly window: readonly boolean[]
@@ -254,6 +262,17 @@ export function applyAuditEvent(
       if (action === 'on') return { ...state, enabledOverride: true }
       if (action === 'off') return { ...state, enabledOverride: false }
       if (action === 'approve') return { ...state, pendingOverrides: state.pendingOverrides + 1 }
+      if (action === 'model') {
+        const value = args.split(/\s+/u).slice(1).join(' ').trim()
+        // `model default` clears the override back to the deployment default.
+        if (value.length === 0 || value === 'default') {
+          // Drop the key rather than set it to undefined: the state is persisted
+          // JSON, and an explicit undefined key is noise the cache has to carry.
+          const { modelOverride: _dropped, ...rest } = state
+          return rest
+        }
+        return { ...state, modelOverride: value }
+      }
       return state
     }
 
@@ -291,7 +310,12 @@ export function applyAuditEvent(
 /** Derive the client-visible ledger from raw state. */
 export function auditView(
   state: AuditState,
-  defaults: { readonly enabledByDefault: boolean; readonly maxReviewsPerTurn: number; readonly breakerTrips: boolean },
+  defaults: {
+    readonly enabledByDefault: boolean
+    readonly maxReviewsPerTurn: number
+    readonly breakerTrips: boolean
+    readonly defaultReviewerModel: string
+  },
 ): AuditView {
   return {
     records: state.records,
@@ -303,6 +327,7 @@ export function auditView(
     total: state.total,
     refused: state.refused,
     pendingOverrides: state.pendingOverrides,
+    reviewerModel: state.modelOverride ?? defaults.defaultReviewerModel,
   }
 }
 
@@ -459,6 +484,7 @@ export function createAuditProjection(defaults: {
   readonly enabledByDefault: boolean
   readonly maxReviewsPerTurn: number
   readonly breakerTrips: (state: AuditState) => boolean
+  readonly defaultReviewerModel: string
 }): WiredProjectionDefinition<AuditProjectionKey> {
   const stateSchema = z.object({
     records: z.array(z.any()),
@@ -467,6 +493,7 @@ export function createAuditProjection(defaults: {
     turn: z.number(),
     step: z.number(),
     enabledOverride: z.boolean().optional(),
+    modelOverride: z.string().optional(),
     reviewsThisTurn: z.number(),
     denialsStreak: z.number(),
     window: z.array(z.boolean()),
@@ -487,6 +514,7 @@ export function createAuditProjection(defaults: {
         enabledByDefault: defaults.enabledByDefault,
         maxReviewsPerTurn: defaults.maxReviewsPerTurn,
         breakerTrips: defaults.breakerTrips(state),
+        defaultReviewerModel: defaults.defaultReviewerModel,
       }),
     },
   }

@@ -25,15 +25,20 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { ReviewCard } from './ReviewCard.tsx'
 import { ReviewToggle } from './ReviewToggle.tsx'
+import { LedgerView } from './LedgerView.tsx'
 import type { ClientAuditView } from './types.ts'
 
 /** Slot entry ids; stable so a redeploy replaces its own rows. */
 export const CARD_SLOT_ID = 'approval-review-card'
 /** Composer toggle entry id. */
 export const TOGGLE_SLOT_ID = 'approval-review-toggle'
+/** Conversation tab entry id. */
+export const VIEW_SLOT_ID = 'approval-review-ledger'
 
 /** The session-header action row the ledger card contributes to. */
 const CARD_SLOT = 'conversation.session.header.actions'
+/** The conversation tab strip, beside 轨迹 / 上下文 / 费用. */
+const VIEW_SLOT = 'conversation.view'
 /**
  * The composer tool row. `conversation.input.left` is a `list` slot with no
  * owner, which is what lets this sit INSIDE the row beside the access-mode chip
@@ -100,6 +105,12 @@ function ApprovalReviewCard(props: SessionActionProps & ApprovalReviewInjected):
   return ReviewCard({ view, zh: preferZh(), runCommand: props.runCommand })
 }
 
+/** Render the full ledger tab. */
+function ApprovalReviewLedger(props: SessionActionProps & ApprovalReviewInjected): React.JSX.Element {
+  const view = props.useProjection('approvalReview') as ClientAuditView | undefined
+  return LedgerView({ view, zh: preferZh(), runCommand: props.runCommand })
+}
+
 /** Render the composer "who decides" toggle. */
 function ApprovalReviewToggle(props: SessionActionProps & ApprovalReviewInjected): React.JSX.Element {
   const view = props.useProjection('approvalReview') as ClientAuditView | undefined
@@ -137,6 +148,18 @@ export function apply(ctx: ClientContext): void {
       }
     },
   })
+
+  ctx.slots.inject(VIEW_SLOT, () => ctx.slots.register(
+    {
+      name: VIEW_SLOT,
+      id: VIEW_SLOT_ID,
+      // After the built-in 轨迹 tab so the strip keeps its familiar order.
+      order: 40,
+      label: () => (preferZh() ? '审批' : 'Approvals'),
+      inject,
+    },
+    ApprovalReviewLedger,
+  ))
 
   ctx.slots.inject(TOGGLE_SLOT, () => ctx.slots.register(
     {
