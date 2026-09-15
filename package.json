@@ -1,6 +1,6 @@
 {
   "name": "dsh-approval-review",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Codex-style agent auto-approval for DeepSeek Harness: an independent reviewer model decides allow/deny on the approval answerer chain, fail-closed, with per-decision detailed records and a dedicated review card page. · DSH 插件：Codex 风格的 Agent 自动审批，独立 reviewer 模型裁决、fail-closed、每次审批留详细理由，并有独立卡页展示。",
   "type": "module",
   "main": "./lib/index.js",
@@ -25,6 +25,7 @@
   "sideEffects": false,
   "scripts": {
     "build": "tsdown",
+    "dev": "tsdown --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "npm run typecheck && npm run test && npm run build",

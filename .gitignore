@@ -1,5 +1,9 @@
 node_modules/
-lib/
+# `lib/` IS committed on purpose. A GitHub install goes through pnpm, which
+# blocks a git dependency's `prepare` build until the profile allowlists it —
+# shipping the built bundles makes `dsh plugin add github:...` work with no
+# extra step, and matches what the npm package publishes (`files: [lib, ...]`).
+lib/**/*.map
 *.log
 .DS_Store
 pnpm-lock.yaml

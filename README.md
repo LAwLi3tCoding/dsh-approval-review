@@ -27,7 +27,7 @@ circuit breaker stops the agent from looping on escalation attempts.
 | **Official seam** | An `approval/request` answerer registered with `prepend: true`, so it claims a request ahead of the human UI answerer, and delegates everything else back to the chain. |
 | **Second-model review** | A one-shot reviewer runs as a **read-only subagent** (`fork`) holding only `read`/`glob`/`grep`, so it can go READ the workspace — "is this path actually inside the repo?" becomes a fact, not a guess. `mode: direct` falls back to a plain model call over the evidence packet. |
 | **Fail closed** | A crashed, timed-out, truncated, or off-schema reviewer answer yields the configured failure policy, which defaults to `rejected`. Insufficient evidence never becomes an approval. |
-| **Rationale reaches the model** | A denial's reason is appended to the refused tool result, with an explicit instruction not to pursue the same outcome through a workaround. |
+| **Rationale reaches the model** | A denial's reason is appended to the refused tool result, with an explicit instruction not to pursue the same outcome through a workaround. An **allow** verdict rides the same channel (gated by `recordAllowedVerdicts`): the approval outcome is a closed vocabulary, so the tool result is the only place the plugin can write durably — without it the card can show that an action ran but never why. |
 | **Risk gate** | An `allow` verdict above `maxAutoAllowRisk` does not auto-allow; it delegates to the human. |
 | **Circuit breaker** | Consecutive and rolling-window denial thresholds, matching Codex's per-turn breaker, after which further requests go to the human chain. |
 | **Budgets** | A per-turn cap on reviewer calls, so a loop cannot bill unlimited reviews. |
@@ -35,7 +35,7 @@ circuit breaker stops the agent from looping on escalation attempts.
 | **Fourth access mode** | An `替我审批` ("approve for me") entry beside 仅可查看 / 工作区内修改 / 完全权限. It shares its sandbox and approval knobs with `workspace-write` on purpose — the difference is WHO answers — so the menu entry itself is the switch. `PermissionPresetService.derive()` checks the recorded selection first, which is what lets the two coexist and stay selected. |
 | **Verdict cache** | Reuses a recent verdict for a byte-identical `tool + arguments`, so a retry loop does not bill a reviewer call each time. Only consulted when `context.turns` is 0, where the verdict really is replayable from the action alone. |
 | **Failure budget** | A per-turn cap on reviewer *failures*, so a broken reviewer cannot be retried without bound while the request waits. |
-| **Audit card** | A session-header card rendering every request with its verdict, risk, rationale, safer-alternative suggestion, reviewer route, timing, and the live budget/breaker state, plus working on/off and one-shot-approve buttons. |
+| **Approvals tab** | A conversation tab rendering every request with its verdict, routing policy, risk, rationale, safer-alternative suggestion, reviewer route, timing, and the live budget/breaker state, plus working on/off and one-shot-approve buttons. |
 
 ## Install
 
@@ -106,6 +106,7 @@ schema defaults.
 | `override.maxPending` | `10` | How many recent denials the override can address. |
 | `reasonMaxChars` | `2000` | Cap on any reason string the plugin emits. |
 | `feedReasonToModel` | `true` | Append the rationale to the refused tool result. |
+| `recordAllowedVerdicts` | `true` | Append the **allow** verdict to the accepted tool result, so the card can show why an action was allowed. Costs one short marker block in the model context per auto-allowed call. |
 | `language` | `en` | `/approval-review` output language (`en` / `zh`). |
 
 ### Tool policies
@@ -147,7 +148,7 @@ human prompt until a deployment decides otherwise.
 ## Session command
 
 ```
-/approval-review on|off|status|approve [n]
+/approval-review on|off|status|approve [n]|model [<provider>/]<id>
 ```
 
 - **`on` / `off`** — the durable per-session switch. It survives restart and
@@ -167,15 +168,57 @@ The package's `dsh.client` declaration auto-registers the browser half; the host
 registers an `approvalReview` session projection whenever the profile provides
 the session-projection capability. No extra patch row is needed.
 
-The card opens from the session header and shows, per request: the tool, the
-verdict, the risk grade, the reviewer's rationale, an optional safer-alternative
-suggestion, which rule selected the policy, the asker's own reason, the reviewer
-route and duration, the risk/uncertainty flags, an expandable argument view, and
-a one-shot approve button for recent denials. It also shows the live budget,
-denial streak, and breaker state, plus the equivalent slash command.
+The **Approvals tab** sits in the conversation view beside 轨迹 / 上下文 / 费用 and
+renders the ledger as a full page: per request, the tool, the verdict, the
+**routing policy**, the risk grade, the reviewer's rationale, an optional
+safer-alternative suggestion, the asker's own reason, the reviewer route and
+duration, the risk/uncertainty flags, an expandable argument view, and a one-shot
+approve button for recent denials. It also shows the live budget, denial streak,
+and breaker state, plus the equivalent slash command.
 
-Without the projection capability the card reports itself unavailable and the
+**There is no session-header card any more.** It read the same projection as the
+tab and rendered the same ledger into a popover, on the most contended strip of
+the session chrome — the tab already shows it full-page, so the card was a
+duplicate.
+
+**Every row states whether this plugin decided it.** The projection folds the
+host's own `approval/asked` events, so the tab also contains requests this plugin
+never arbitrated — a `web_fetch` handed back by `defaultPolicy: human`, or an
+`ask` raised by `dsh-permission-rules`' network policy. Those rows carry a
+`delegated` / `hard-disabled` tag and the real `policy · policySource` (re-derived
+from the deployment config at fold time) instead of masquerading as `ai ·
+unrecorded`. A missing rationale is likewise worded per routing policy, so "no
+record" is never reported as "not decided by this plugin".
+
+**It lists approval requests, not tool calls.** A call the sandbox allowed
+outright, which never raised an approval, never appears; anything that DID raise
+one appears, whichever plugin raised it.
+
+Without the projection capability the tab reports itself unavailable and the
 answerer is unaffected.
+
+## The access-mode glyph
+
+The access-mode menu's icon table inside
+`@deepseek-ai/dsh-client-ui-conversation` is a **closed design set**: only the
+three built-in keys have shield glyphs, and the `permissions` projection carries
+value/name/description only, so the host cannot be asked for one. The fourth
+entry therefore renders with no icon.
+
+`src/client/access-mode-glyph.ts` supplies it from the browser half: it marks the
+access-mode trigger and the matching menu row with
+`data-dsh-approval-review-glyph`, and a plugin-owned stylesheet draws the same
+shield carrying an eye (the boundary is unchanged — someone looked before it was
+crossed) through `::before` and an SVG mask.
+
+- **It never touches React's tree**: attributes only, no inserted nodes, so
+  child reconciliation is left alone.
+- **It yields to the built-in glyph**: once the host really ships one for this
+  key (e.g. you rebuilt the harness client package), the shim sees it and drops
+  its own mark, so the icon is never drawn twice.
+- Rename the preset without updating the label list in that file and the glyph
+  simply does not appear; the menu keeps working. It is a progressive
+  enhancement, not a dependency.
 
 ## How it works
 
@@ -194,9 +237,10 @@ answerer is unaffected.
                │ ai
                ▼
    ┌──────────────────────────────────────────────┐
-   │ reviewer: one-shot model call                 │
+   │ reviewer: one-shot call / read-only subagent  │
    │  · evidence: proposed action + redacted args  │
-   │    + ask reason + bounded transcript          │
+   │    + ask reason + bounded transcript,         │
+   │      fenced as DATA and not instructions      │
    │  · output: {decision, risk, reason, suggest}  │
    │  · timeout raced against the request signal   │
    └───────────┬──────────────────────────────────┘
@@ -237,9 +281,19 @@ reconstructible from the log alone.
 - **The transcript uses the same redaction.** It reads the same `tool/call` event
   as the proposed-action section; a transcript built from the raw argument string
   would hand the reviewer exactly the credentials the other section masked.
-- **The reviewer is not an agent.** It runs as one model call with no tools and no
-  workspace access, so a reviewer compromise cannot escalate the boundary it
-  guards, and it cannot recurse into the answerer it serves.
+- **The reviewer's evidence is data, not instructions.** The transcript and the
+  asker's reason can contain repository-controlled text (`AGENTS.md`, a file under
+  review, command output). The data/instruction boundary is appended by code and
+  cannot be overridden by `policyText`, and an instruction — or a claim that the
+  action was already approved — inside the evidence counts AGAINST the action.
+- **The reviewer is read-only.** `mode: direct` is one model call holding no
+  tools; `mode: subagent` is a child with a `toolFilter` allow-list and
+  `maxDepth: 1` — the child's own delegation depth, so it may exist and may not
+  spawn a grandchild. Neither form can write, execute, or delegate, so a reviewer
+  compromise cannot escalate the boundary it guards.
+- **The reviewer cannot recurse.** A reviewer child is registered as soon as it
+  exists, so its own approval asks are delegated to the human chain instead of
+  returning to the answerer serving it.
 - **Fail closed by default.** `onReviewerFailure: rejected`, `onUncertain:
   delegate`, and `maxAutoAllowRisk: medium` are the shipping choices because
   refusing a safe action costs a retry while approving an unsafe one may be

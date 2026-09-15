@@ -77,6 +77,13 @@
         # reads. This is also what makes the card's rationale durable, so turning
         # it off costs the model its explanation AND the card its reason line.
         feedReasonToModel: true
+        # Append the ALLOW verdict to the accepted tool result. An approval
+        # outcome is a closed vocabulary, so the tool result is the only channel
+        # this plugin can write durably without inventing a session event type;
+        # without it an allowed row shows THAT an action ran but never WHY. The
+        # cost is one short marker block in the model's context per auto-allowed
+        # call; turning it off empties the "rationale" line of allowed rows.
+        recordAllowedVerdicts: true
         language: en
 
 # --- "Approve for me" as a PEER access-mode option -------------------------
