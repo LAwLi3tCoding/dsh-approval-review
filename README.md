@@ -39,6 +39,16 @@ circuit breaker stops the agent from looping on escalation attempts.
 
 ## Install
 
+> **No build step on install.** The repository carries the built bundles
+> (`lib/`) and `package.json` declares no `prepare` script, because pnpm blocks a
+> git dependency's `prepare`/`install` build scripts
+> (`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`) and that fails the entire install.
+> `dsh plugin add github:...` therefore works with no `allowBuilds` entry in the
+> profile's `pnpm-workspace.yaml`.
+>
+> You only build when working from a source clone: `pnpm build` (and `prepack`
+> runs it automatically before a publish).
+
 ```sh
 # npm (published releases)
 dsh plugin --profile <profile> add dsh-approval-review

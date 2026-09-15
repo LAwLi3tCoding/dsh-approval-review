@@ -28,15 +28,11 @@
 
 ## 安装
 
-> **从 GitHub 安装需要构建。** `lib/` 不在版本库里（`.gitignore` 里排除了），而 `dsh plugin add github:...` 走的是 pnpm 的 git 依赖：它会跑本包的 `prepare`（`tsdown`），但 pnpm ≥10 默认拦下 git 依赖的构建脚本。装的时候 pnpm 会打印它要求的那把 key，把它加到 profile 的 `pnpm-workspace.yaml` 里再装一次：
+> 仓库里**带了构建产物**（`lib/`），并且 `package.json` 里没有 `prepare` 脚本 —— 因为 pnpm 会拦下
+> git 依赖的 `prepare`/`install` 构建脚本（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`），那会让整次安装直接失败。
+> 所以 `dsh plugin add github:...` 开箱即用，不需要往 profile 的 `pnpm-workspace.yaml` 加 `allowBuilds`。
 >
-> ```yaml
-> allowBuilds:
->   dsh-approval-review: true
-> ```
->
-> 想免掉这一步就把 `lib/` 一起提交（对着源码的 `files` 字段，npm 包本来也只发 `lib`）。
-
+> 只有你**从源码 clone 自己改**时才需要构建：`pnpm build`（发布前由 `prepack: tsdown` 自动跑）。
 
 ```sh
 # npm 发布版
