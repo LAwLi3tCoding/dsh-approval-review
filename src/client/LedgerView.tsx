@@ -23,8 +23,11 @@ export interface LedgerViewProps {
   readonly view: ClientAuditView | undefined
   /** Whether to render copy in Chinese. */
   readonly zh: boolean
-  /** Runs one slash command line in this session. */
-  readonly runCommand?: (line: string) => void
+  /**
+   * Runs one slash command line in this session. A returned string is a failure
+   * line the host refused, which the tab surfaces instead of swallowing.
+   */
+  readonly runCommand?: (line: string) => void | Promise<string | null>
   /**
    * Reviewer routes this deployment offers, as `provider/model`, in pick order.
    * Empty means this host publishes no model list, and the picker falls back to
@@ -250,6 +253,15 @@ export function LedgerView({ view, zh, runCommand, modelChoices, loadModels }: L
   const rootRef = useRef<HTMLDivElement>(null)
   useStartAtTop(rootRef)
   const [loadedChoices, setLoadedChoices] = useState<readonly string[] | undefined>(undefined)
+  // A refused command used to look identical to a click that did nothing.
+  const [commandError, setCommandError] = useState<string | null>(null)
+  const run = (line: string): void => {
+    if (runCommand === undefined) return
+    setCommandError(null)
+    void Promise.resolve(runCommand(line))
+      .then((failure) => { if (typeof failure === 'string') setCommandError(failure) })
+      .catch((error: unknown) => { setCommandError(String(error)) })
+  }
   // The base list (override in force + session model) paints immediately; the
   // catalog replaces it once loaded, so the picker is never empty in between.
   const choices = loadedChoices ?? modelChoices ?? []
@@ -273,11 +285,11 @@ export function LedgerView({ view, zh, runCommand, modelChoices, loadModels }: L
         </span>
         {runCommand === undefined ? null : (
           <>
-            <button type="button" disabled={view?.enabled === true} onClick={() => runCommand('/approval-review on')}
+            <button type="button" disabled={view?.enabled === true} onClick={() => run('/approval-review on')}
               style={{ fontSize: 11, padding: '3px 9px', borderRadius: 6, cursor: view?.enabled === true ? 'default' : 'pointer', border: `1px solid ${BORDER}`, color: view?.enabled === true ? MUTED : TEXT, background: 'transparent' }}>
               {zh ? '开启' : 'on'}
             </button>
-            <button type="button" disabled={view?.enabled === false} onClick={() => runCommand('/approval-review off')}
+            <button type="button" disabled={view?.enabled === false} onClick={() => run('/approval-review off')}
               style={{ fontSize: 11, padding: '3px 9px', borderRadius: 6, cursor: view?.enabled === false ? 'default' : 'pointer', border: `1px solid ${BORDER}`, color: view?.enabled === false ? MUTED : TEXT, background: 'transparent' }}>
               {zh ? '关闭' : 'off'}
             </button>
@@ -295,7 +307,7 @@ export function LedgerView({ view, zh, runCommand, modelChoices, loadModels }: L
           <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
             <ModelPicker
               choices={choices}
-              runCommand={runCommand}
+              runCommand={run}
               loadModels={loadModels}
               zh={zh}
               onChoicesLoaded={(routes) => {
@@ -304,7 +316,7 @@ export function LedgerView({ view, zh, runCommand, modelChoices, loadModels }: L
             />
             <button
               type="button"
-              onClick={() => runCommand('/approval-review model default')}
+              onClick={() => run('/approval-review model default')}
               style={{ fontSize: 11, padding: '3px 9px', borderRadius: 6, cursor: 'pointer', border: `1px solid ${BORDER}`, color: TEXT, background: 'transparent' }}
             >{zh ? '继承' : 'inherit'}</button>
           </span>
@@ -317,6 +329,12 @@ export function LedgerView({ view, zh, runCommand, modelChoices, loadModels }: L
           </span>
         )}
       </div>
+
+      {commandError === null ? null : (
+        <div style={{ fontSize: 11, color: REFUSED, marginBottom: 8 }}>
+          {zh ? '命令被拒：' : 'command refused: '}{commandError}
+        </div>
+      )}
 
       {view?.circuitOpen === true ? (
         <div style={{ fontSize: 12, color: REFUSED, marginBottom: 10 }}>
@@ -340,7 +358,7 @@ export function LedgerView({ view, zh, runCommand, modelChoices, loadModels }: L
               deniedIndex={deniedIndexOf(record)}
               onApprove={runCommand === undefined
                 ? undefined
-                : (_r, index) => runCommand(`/approval-review approve ${index}`)}
+                : (_r, index) => run(`/approval-review approve ${index}`)}
             />
           ))}
         </div>

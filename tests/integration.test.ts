@@ -379,6 +379,39 @@ describe('approval audit trail', () => {
     expect(reviewer.calls[0]!.model).toBe('deepseek-v4-pro')
   })
 
+  it('applies `/approval-review model <provider>/<model>` through the real command runtime', async () => {
+    // This is the path the Approvals tab's picker drives: the client sends a
+    // slash line to the command remote, the handler runs, `command/run` is
+    // appended, the runtime folds it, and the next review uses the new route.
+    // Anything broken in between (line parsing, argument case, the fold) shows
+    // up here rather than as a picker that silently does nothing.
+    const { ctx, reviewer } = await mounted()
+    const { agent, appended } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
+    const outcome = await ctx.commands.execute(
+      agent,
+      '/approval-review model test/reviewer-model',
+      [],
+      new AbortController().signal,
+    )
+    expect(outcome?.result.kind).toBe('success')
+    // The harness stub does not dispatch `session/event` the way the real
+    // `Session.append` does (packages/core/session/src/index.ts), so replay what
+    // it appended — otherwise this test would only exercise the stub.
+    for (const event of appended) emitSessionEvent(ctx, agent.session, event)
+
+    await ctx.approval.request(requestOf(agent, 'bash', 'c'))
+
+    expect(reviewer.calls[0]!.model).toBe('reviewer-model')
+  })
+
+  it('reports an unknown model command instead of a silent no-op', async () => {
+    const { ctx } = await mounted()
+    const { agent } = fakeAgent()
+    const outcome = await ctx.commands.execute(agent, '/approval-review nonsense', [], new AbortController().signal)
+    // The handler answers with an error kind; the client surfaces its text.
+    expect(outcome?.result.kind).toBe('error')
+  })
+
   it('respects a reviewer route configured separately from the agent', async () => {
     const { ctx, reviewer } = await mounted({ reviewer: { provider: 'test', model: 'reviewer-model' } })
     const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
