@@ -32,6 +32,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { LedgerView } from './LedgerView.tsx'
 import { installAccessModeGlyph } from './access-mode-glyph.ts'
 import { reviewerRouteChoices, routesFromDirectory } from './model-choices.ts'
+import { runCommandLine, type CommandRemoteFace } from './run-command.ts'
 import type { ClientAuditView } from './types.ts'
 
 /** Slot entry id; stable so a redeploy replaces its own row. */
@@ -49,22 +50,6 @@ const VIEW_SLOT = 'conversation.view'
  * is exactly the bug this cost once.
  */
 export const inject = ['slots', 'remote', 'remote.commands']
-
-/**
- * The command-remote subset this half drives. Spelled structurally so the
- * browser half keeps building against the harness packages it truly needs.
- */
-interface CommandRemoteFace {
-  readonly commands: {
-    /**
-     * Execute one slash-command line in a session.
-     * @param sessionId - the session the command runs in.
-     * @param line - the full command line, leading slash included.
-     * @returns the remote outcome; `ok` is false when the host refused it.
-     */
-    execute(sessionId: SessionId, line: string): Promise<{ readonly ok: boolean }>
-  }
-}
 
 /**
  * The client model directory this harness publishes for model picking.
@@ -182,16 +167,10 @@ export function apply(ctx: ClientContext): void {
       }
     },
     runCommand: async (line: string) => {
-      const commands = remoteOf()
-      if (commands === undefined) return 'the command remote is not mounted in this client'
-      const sessionId = rawSessionId as SessionId
-      try {
-        const result = await commands.execute(sessionId, line)
-        if (!result.ok) return `the host refused "${line}"`
-        return null
-      } catch (error: unknown) {
-        return `"${line}" failed: ${String(error)}`
-      }
+      // The remote is resolved per call (see `remoteOf`), and the line goes out
+      // through `runCommandLine`, which owns the 3-business-argument arity and
+      // the refusal mapping.
+      return await runCommandLine(remoteOf(), rawSessionId as SessionId, line)
     },
   })
 
