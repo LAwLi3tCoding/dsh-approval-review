@@ -6,7 +6,7 @@
 boundary that the sandbox does not cover on its own, a second, independent
 reviewer model reads the proposed action and returns a verdict — so a human
 approves nothing routine, and nothing unsafe slips through. Every decision leaves
-a full rationale in a dedicated review card.
+a full rationale in a dedicated Approvals tab.
 
 This plugin implements the shape of Codex's
 [Auto-review](https://developers.openai.com/codex/concepts/sandboxing/auto-review):
@@ -172,7 +172,7 @@ human prompt until a deployment decides otherwise.
   authorization as reviewer context, and the reviewer still decides
   independently.
 
-## The review card
+## The Approvals tab
 
 The package's `dsh.client` declaration auto-registers the browser half; the host
 registers an `approvalReview` session projection whenever the profile provides
