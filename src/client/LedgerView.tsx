@@ -12,8 +12,9 @@
  * @module dsh-approval-review/client/LedgerView
  */
 
-import { useMemo, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { ClientAuditRecord, ClientAuditView, ClientRisk } from './types.ts'
+import { resetScrollableAncestorToTop } from './scroll.ts'
 
 /** Props for the ledger tab. */
 export interface LedgerViewProps {
@@ -226,7 +227,30 @@ function Entry({ record, zh, onApprove, deniedIndex }: {
 }
 
 /** The full ledger tab. */
+/**
+ * Start a freshly opened ledger at its top.
+ *
+ * The tab renders inside the conversation's resident scrollport, which the
+ * transcript keeps pinned to its newest line, so a ledger mounted under it would
+ * show its own BOTTOM — while the ledger lists the newest decision FIRST. The
+ * walk that finds the box to reset lives in `./scroll.ts`.
+ * @param root - the ledger's root element.
+ */
+function useStartAtTop(root: React.RefObject<HTMLDivElement | null>): void {
+  useEffect(() => {
+    const element = root.current
+    if (element === null) return
+    // Our own container first: it is the scroller whenever the height chain
+    // reaches it, and a fresh mount already starts at zero there.
+    element.scrollTop = 0
+    if (typeof window === 'undefined') return
+    resetScrollableAncestorToTop(element, node => window.getComputedStyle(node).overflowY)
+  }, [root])
+}
+
 export function LedgerView({ view, zh, runCommand, modelChoices, loadModels }: LedgerViewProps): React.JSX.Element {
+  const rootRef = useRef<HTMLDivElement>(null)
+  useStartAtTop(rootRef)
   const [modelDraft, setModelDraft] = useState('')
   const [loadedChoices, setLoadedChoices] = useState<readonly string[] | undefined>(undefined)
   // The base list (override in force + session model) paints immediately; the
@@ -250,7 +274,7 @@ export function LedgerView({ view, zh, runCommand, modelChoices, loadModels }: L
   }
 
   return (
-    <div style={{ padding: '14px 16px', overflow: 'auto', height: '100%', fontFamily: 'inherit' }}>
+    <div ref={rootRef} style={{ padding: '14px 16px', overflow: 'auto', height: '100%', fontFamily: 'inherit' }}>
       <div style={headerStyle}>
         <strong style={{ fontSize: 14, color: TEXT }}>{zh ? '审批审计' : 'Approval audit'}</strong>
         <span style={{ fontSize: 12, color: view?.enabled === false ? MUTED : ALLOWED }}>
