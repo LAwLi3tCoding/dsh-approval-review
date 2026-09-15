@@ -23,6 +23,12 @@ export interface LedgerViewProps {
   readonly zh: boolean
   /** Runs one slash command line in this session. */
   readonly runCommand?: (line: string) => void
+  /**
+   * Reviewer routes this deployment offers, as `provider/model`, in pick order.
+   * Empty means this host publishes no model list, and the picker falls back to
+   * a free-text id.
+   */
+  readonly modelChoices?: readonly string[]
 }
 
 const TEXT = 'var(--dsw-alias-label-primary, #e6edf3)'
@@ -42,6 +48,46 @@ function riskTone(risk: ClientRisk | undefined): string {
   if (risk === 'high' || risk === 'critical') return REFUSED
   return MUTED
 }
+
+/**
+ * Whether the plugin was even responsible for one row, from the policy that
+ * routed it. A `human` or `never` row sits on the card because the user asked
+ * for a record of every approval, NOT because a reviewer judged it.
+ */
+function routingTag(record: ClientAuditRecord, zh: boolean): string | undefined {
+  if (record.policy === 'never') return zh ? '硬禁用' : 'hard-disabled'
+  if (record.policy === 'human') return zh ? '交还人工' : 'delegated'
+  return undefined
+}
+
+/**
+ * The rationale line, told truthfully.
+ *
+ * A missing rationale has three very different causes and the row must not
+ * blame the wrong one: a `never` row never ran a reviewer, a `human` row was
+ * handed back to the human answerer, and an `ai` row either never reached the
+ * reviewer or completed with the allow rationale left unpersisted
+ * (`recordAllowedVerdicts: false`, or a value-projection accept).
+ */
+function rationaleText(record: ClientAuditRecord, zh: boolean): string {
+  if (record.reason !== undefined) return record.reason
+  if (record.policy === 'never') {
+    return zh
+      ? '按 never 策略硬禁用，没有经过复核模型。'
+      : 'Hard-disabled by the never policy; no reviewer ran.'
+  }
+  if (record.policy === 'human') {
+    return zh
+      ? '已交还人工应答者，本插件没有裁决这一次。'
+      : 'Delegated to the human answerer; this plugin did not decide it.'
+  }
+  return record.refused
+    ? (zh ? '被否决，但本行没有留下理由记录。' : 'Refused, but no rationale was recorded.')
+    : (zh
+      ? '已放行；本行没有留下理由记录（该请求未走到复核模型，或核可理由未落盘）。'
+      : 'Allowed, but no rationale was recorded (the request never reached the reviewer, or its allow rationale was not persisted).')
+}
+
 
 /** Short wall-clock stamp. */
 function stamp(epochMs: number): string {
@@ -101,6 +147,11 @@ function Entry({ record, zh, onApprove, deniedIndex }: {
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <span style={{ fontFamily: CODE, fontSize: 13, fontWeight: 600, color: TEXT }}>{record.toolName}</span>
         <span style={{ fontSize: 11, color: tone, border: `1px solid ${tone}`, borderRadius: 999, padding: '1px 7px' }}>{verdict}</span>
+        {routingTag(record, zh) === undefined ? null : (
+          <span style={{ fontSize: 11, color: MUTED, border: `1px solid ${BORDER}`, borderRadius: 999, padding: '1px 7px' }}>
+            {routingTag(record, zh)}
+          </span>
+        )}
         {record.risk === undefined ? null : (
           <span style={{ fontSize: 11, color: riskTone(record.risk) }}>{zh ? '风险' : 'risk'} {record.risk}</span>
         )}
@@ -112,15 +163,13 @@ function Entry({ record, zh, onApprove, deniedIndex }: {
       </div>
 
       <Field label={zh ? '裁决理由' : 'rationale'}>
-        {record.reason ?? (zh
-          ? '（未记录：本次审批未经本插件裁决——可能由其他应答者处理，或审计写入被关闭）'
-          : '(not recorded: this approval was not decided by this plugin)')}
+        <span style={{ color: record.reason === undefined ? MUTED : TEXT }}>{rationaleText(record, zh)}</span>
       </Field>
 
       {record.suggestion === undefined ? null : (
         <Field label={zh ? '更安全的做法' : 'safer path'}>{record.suggestion}</Field>
       )}
-      <Field label={zh ? '策略来源' : 'policy'} mono>{record.policy} · {record.policySource}</Field>
+      <Field label={zh ? '路由策略' : 'routing'} mono>{record.policy} · {record.policySource}</Field>
       {record.askReason === undefined ? null : (
         <Field label={zh ? '申请理由' : 'asked why'}>{record.askReason}</Field>
       )}
@@ -162,9 +211,11 @@ function Entry({ record, zh, onApprove, deniedIndex }: {
 }
 
 /** The full ledger tab. */
-export function LedgerView({ view, zh, runCommand }: LedgerViewProps): React.JSX.Element {
+export function LedgerView({ view, zh, runCommand, modelChoices }: LedgerViewProps): React.JSX.Element {
+  const [modelDraft, setModelDraft] = useState('')
   const records = view?.records ?? []
   const denials = useMemo(() => records.filter(r => r.refused), [records])
+  const reviewedCount = useMemo(() => records.filter(r => r.policy === 'ai').length, [records])
   const deniedIndexOf = (record: ClientAuditRecord): number =>
     denials.findIndex(d => d.reviewId === record.reviewId) + 1
 
@@ -194,14 +245,72 @@ export function LedgerView({ view, zh, runCommand }: LedgerViewProps): React.JSX
         )}
         {view === undefined ? null : (
           <span style={{ fontSize: 11, color: MUTED, fontFamily: CODE }}>
-            {zh ? '复核模型 ' : 'reviewer '}{view.reviewerModel.length > 0 ? view.reviewerModel : (zh ? '继承会话' : 'inherit session')}
+            {zh ? '复核模型 ' : 'reviewer '}
+            {view.reviewerModel.length > 0
+              ? `${view.reviewerProvider.length > 0 ? `${view.reviewerProvider}/` : ''}${view.reviewerModel}`
+              : (zh ? '继承会话' : 'inherit session')}
+          </span>
+        )}
+        {runCommand === undefined ? null : (
+          <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+            {modelChoices !== undefined && modelChoices.length > 0 ? (
+              <select
+                value={modelDraft}
+                onChange={event => setModelDraft(event.target.value)}
+                aria-label={zh ? '复核模型' : 'reviewer model'}
+                style={{
+                  fontFamily: CODE, fontSize: 11, padding: '2px 6px', minWidth: 200,
+                  borderRadius: 6, border: `1px solid ${BORDER}`, background: PANEL, color: TEXT,
+                }}
+              >
+                <option value="">{zh ? '选择复核模型…' : 'choose a reviewer model…'}</option>
+                {modelChoices.map(choice => <option key={choice} value={choice}>{choice}</option>)}
+              </select>
+            ) : (
+              // No published list to pick from: a manual id still beats no lever.
+              <input
+                value={modelDraft}
+                onChange={event => setModelDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter' || modelDraft.trim().length === 0) return
+                  runCommand(`/approval-review model ${modelDraft.trim()}`)
+                  setModelDraft('')
+                }}
+                placeholder={zh ? '模型 id 或 provider/model' : 'model id or provider/model'}
+                aria-label={zh ? '复核模型' : 'reviewer model'}
+                style={{
+                  fontFamily: CODE, fontSize: 11, padding: '2px 6px', width: 190,
+                  borderRadius: 6, border: `1px solid ${BORDER}`, background: 'transparent', color: TEXT,
+                }}
+              />
+            )}
+            <button
+              type="button"
+              disabled={modelDraft.trim().length === 0}
+              onClick={() => {
+                runCommand(`/approval-review model ${modelDraft.trim()}`)
+                setModelDraft('')
+              }}
+              style={{
+                fontSize: 11, padding: '3px 9px', borderRadius: 6,
+                cursor: modelDraft.trim().length === 0 ? 'default' : 'pointer',
+                border: `1px solid ${BORDER}`,
+                color: modelDraft.trim().length === 0 ? MUTED : TEXT,
+                background: 'transparent',
+              }}
+            >{zh ? '应用' : 'apply'}</button>
+            <button
+              type="button"
+              onClick={() => runCommand('/approval-review model default')}
+              style={{ fontSize: 11, padding: '3px 9px', borderRadius: 6, cursor: 'pointer', border: `1px solid ${BORDER}`, color: TEXT, background: 'transparent' }}
+            >{zh ? '继承' : 'inherit'}</button>
           </span>
         )}
         {view === undefined || view.total === 0 ? null : (
           <span style={{ fontSize: 11, color: MUTED }}>
             {zh
-              ? `共 ${view.total} 次 · 放行 ${view.total - view.refused} · 否决 ${view.refused} · 本回合复审 ${view.reviewsThisTurn}/${view.maxReviewsPerTurn} · 连续否决 ${view.consecutiveDenials}`
-              : `${view.total} total · ${view.total - view.refused} allowed · ${view.refused} refused · this turn ${view.reviewsThisTurn}/${view.maxReviewsPerTurn} · streak ${view.consecutiveDenials}`}
+              ? `共 ${view.total} 次 · 本插件裁决 ${reviewedCount} · 已否决 ${view.refused} · 本回合复审 ${view.reviewsThisTurn}/${view.maxReviewsPerTurn} · 连续否决 ${view.consecutiveDenials}`
+              : `${view.total} total · ${reviewedCount} routed to the reviewer · ${view.refused} refused · this turn ${view.reviewsThisTurn}/${view.maxReviewsPerTurn} · streak ${view.consecutiveDenials}`}
           </span>
         )}
       </div>

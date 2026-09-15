@@ -1,13 +1,19 @@
 /**
  * Browser half of the automatic-approval control surface.
  *
- * Contributes TWO surfaces:
- * 1. a Session-header action opening the full approval ledger — every request,
- *    the reviewer's verdict and rationale, risk, route, timing, and live
- *    counters;
- * 2. a composer-dock toggle — the independent "who decides" axis sitting beside
- *    the sandbox access-mode chip, mirroring Codex's separation of
- *    `sandbox_mode` from `approvals_reviewer`.
+ * Contributes:
+ * 1. a conversation tab — the approval ledger as a full page, beside 轨迹 /
+ *    上下文 / 费用: every request, the reviewer's verdict and rationale, the
+ *    routing policy, risk, route, timing, and the live counters;
+ * 2. the access-mode glyph for this plugin's `approve-for-me` preset.
+ *
+ * The session-header card this plugin used to contribute is gone: it duplicated
+ * the tab's ledger in a popover that the tab already renders full-page, and the
+ * header is the most contended strip of the session chrome.
+ *
+ * It also decorates the access-mode control with the glyph for this plugin's
+ * `approve-for-me` preset, which the harness's closed glyph table cannot know
+ * about (see `./access-mode-glyph.ts`).
  *
  * The host provides data through the `approvalReview` session projection, so
  * this half reads only whole projection values. Both surfaces drive the host
@@ -23,17 +29,14 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-import { ReviewCard } from './ReviewCard.tsx'
 import { LedgerView } from './LedgerView.tsx'
+import { installAccessModeGlyph } from './access-mode-glyph.ts'
+import { reviewerRouteChoices } from './model-choices.ts'
 import type { ClientAuditView } from './types.ts'
 
-/** Slot entry ids; stable so a redeploy replaces its own rows. */
-export const CARD_SLOT_ID = 'approval-review-card'
-/** Conversation tab entry id. */
+/** Slot entry id; stable so a redeploy replaces its own row. */
 export const VIEW_SLOT_ID = 'approval-review-ledger'
 
-/** The session-header action row the ledger card contributes to. */
-const CARD_SLOT = 'conversation.session.header.actions'
 /** The conversation tab strip, beside 轨迹 / 上下文 / 费用. */
 const VIEW_SLOT = 'conversation.view'
 
@@ -90,23 +93,38 @@ export interface ApprovalReviewInjected {
   runCommand: (line: string) => Promise<string | null>
 }
 
-/** Render the ledger card from the session's audit projection. */
-function ApprovalReviewCard(props: SessionActionProps & ApprovalReviewInjected): React.JSX.Element {
-  const view = props.useProjection('approvalReview') as ClientAuditView | undefined
-  return ReviewCard({ view, zh: preferZh(), runCommand: props.runCommand })
+/** Reviewer routes this deployment offers, read from its own projections. */
+function reviewerChoices(props: SessionActionProps, current: string | undefined): readonly string[] {
+  return reviewerRouteChoices({
+    current,
+    sessionDefault: props.useProjection('modelSelection'),
+    allowed: props.useProjection('subagentModelSelectionPolicy'),
+  })
 }
 
 /** Render the full ledger tab. */
 function ApprovalReviewLedger(props: SessionActionProps & ApprovalReviewInjected): React.JSX.Element {
   const view = props.useProjection('approvalReview') as ClientAuditView | undefined
-  return LedgerView({ view, zh: preferZh(), runCommand: props.runCommand })
+  const current = view === undefined || view.reviewerModel.length === 0
+    ? undefined
+    : `${view.reviewerProvider.length > 0 ? `${view.reviewerProvider}/` : ''}${view.reviewerModel}`
+  return LedgerView({
+    view,
+    zh: preferZh(),
+    runCommand: props.runCommand,
+    modelChoices: reviewerChoices(props, current),
+  })
 }
 
 /**
- * Register the ledger card and the composer toggle.
+ * Register the ledger tab and the access-mode glyph.
  * @param ctx - client Cordis context.
  */
 export function apply(ctx: ClientContext): void {
+  // The glyph is decoration over a control this plugin's preset is part of; it
+  // owns a style element, a few attributes, and one observer, all released by
+  // the effect when the plugin unmounts or reloads.
+  ctx.effect(() => installAccessModeGlyph(), 'approval-review: access-mode glyph')
   /**
    * The remote is resolved LAZILY, per call. Capturing `ctx.remote` in the
    * `apply` closure is wrong: `apply` can run before the remote facade finishes
@@ -116,7 +134,7 @@ export function apply(ctx: ClientContext): void {
   const remoteOf = (): CommandRemoteFace['commands'] | undefined =>
     (ctx as unknown as { remote?: CommandRemoteFace }).remote?.commands
 
-  /** The per-session business face both seats share. */
+  /** The per-session business face the tab's seat uses. */
   // The seat hands the session id as a plain string; the command remote takes
   // the branded id, so the brand is reasserted at this one boundary.
   const inject = (rawSessionId: string): ApprovalReviewInjected => ({
@@ -144,16 +162,5 @@ export function apply(ctx: ClientContext): void {
       inject,
     },
     ApprovalReviewLedger,
-  ))
-
-  ctx.slots.inject(CARD_SLOT, () => ctx.slots.register(
-    {
-      name: CARD_SLOT,
-      id: CARD_SLOT_ID,
-      // Beside the other session utilities, after the static session identity.
-      order: 40,
-      inject,
-    },
-    ApprovalReviewCard,
   ))
 }

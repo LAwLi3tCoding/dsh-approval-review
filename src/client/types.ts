@@ -47,4 +47,6 @@ export interface ClientAuditView {
   readonly pendingOverrides: number
   /** Reviewer model in force for this session; `''` means inherit the session model. */
   readonly reviewerModel: string
+  /** Provider half of the effective reviewer route; `''` means the inherited one. */
+  readonly reviewerProvider: string
 }
