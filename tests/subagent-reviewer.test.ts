@@ -39,6 +39,13 @@ class FakeSubagents implements SubagentStarter {
   async start(name: string, request: SubagentStartRequest): Promise<SubagentRun> {
     this.calls.push({ name, request })
     if (this.startFailure !== undefined) throw this.startFailure
+    // Mirror the seam's ABSOLUTE depth guard. Without this the fake accepted
+    // `maxDepth: 0`, which the real seam always rejects — the stub hid the bug
+    // that made every reviewer dispatch throw in 2 ms.
+    const childDepth = 1
+    if (request.maxDepth !== undefined && childDepth > request.maxDepth) {
+      throw new Error(`subagent depth ${childDepth} exceeds maxDepth ${request.maxDepth}`)
+    }
     const structured = this.structured
     const text = this.text
     const stopReason = this.stopReason
@@ -99,10 +106,46 @@ describe('runSubagentReviewer wiring', () => {
     expect(stub.calls[0]!.request.toolFilter).toEqual({ allow: ['read', 'glob', 'grep'] })
   })
 
-  it('keeps the reviewer non-delegating with maxDepth 0', async () => {
+  it('caps the reviewer at its own depth so it cannot delegate further', async () => {
+    // The seam computes the child depth as `parentDepth + 1` and rejects a cap
+    // it would exceed, so 0 forbids the reviewer from STARTING at all (the bug
+    // that made every review fail closed). 1 admits the child and refuses any
+    // grandchild it might try to spawn.
     const stub = new FakeSubagents()
     await runSubagentReviewer(mounted(stub), input())
-    expect(stub.calls[0]!.request.maxDepth).toBe(0)
+    expect(stub.calls[0]!.request.maxDepth).toBe(1)
+  })
+
+  it('registers the child so its own asks are never reviewed, then releases it', async () => {
+    const stub = new FakeSubagents()
+    const registered: string[] = []
+    const released: string[] = []
+    await runSubagentReviewer(mounted(stub), input({
+      registerChildSession: (sessionId) => {
+        registered.push(sessionId)
+        return () => { released.push(sessionId) }
+      },
+    }))
+    expect(registered).toEqual(['child-1'])
+    expect(released).toEqual(['child-1'])
+  })
+
+  it('still releases the child mark when the reviewer returns no verdict', async () => {
+    const stub = new FakeSubagents()
+    stub.structured = undefined
+    stub.text = 'not json at all'
+    const released: string[] = []
+    const result = await runSubagentReviewer(mounted(stub), input({
+      registerChildSession: () => () => { released.push('child-1') },
+    }))
+    expect(result.verdict).toBeUndefined()
+    expect(released).toEqual(['child-1'])
+  })
+
+  it('labels the child with the reviewer prefix', async () => {
+    const stub = new FakeSubagents()
+    await runSubagentReviewer(mounted(stub), input())
+    expect(stub.calls[0]!.request.label).toBe('approval-review: bash')
   })
 
   it('falls back to the read-only allow-list when the configured one is empty', async () => {
