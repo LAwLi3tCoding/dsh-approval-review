@@ -1,0 +1,80 @@
+# dsh-approval-review bundle layer.
+#
+# A YAML array of row verbs; `insert` adds plugin rows to the composed config.
+# A row's `id` is unique within the layer stack, and `name` resolves the plugin
+# module through the installed package (`package.json#main`).
+#
+# Layer semantics: an id-targeted override REPLACES this whole config row, so a
+# deployment that overrides any key must restate every key it still wants.
+# Dropping `reviewTools` returns the tool table to its schema default, and
+# dropping `defaultPolicy` returns unlisted tools to `human` — i.e. back to the
+# ordinary approval prompt.
+- insert:
+    - id: approval-review
+      name: dsh-approval-review
+      config:
+        # Master switch. `false` mounts the plugin but claims nothing; the
+        # per-session `/approval-review on|off` switch is the runtime lever.
+        enabled: true
+        # Session-start default for that switch.
+        enabledByDefault: true
+        # Tool names routed to the reviewer model. Everything else falls through
+        # to `defaultPolicy`, whose default delegates to the human answerer.
+        # `edit` is deliberately absent: in-place modification of an existing
+        # file is the highest-consequence routine action, so it keeps the human
+        # prompt until a deployment decides otherwise.
+        reviewTools:
+          - bash
+          - pwsh
+          - write
+        defaultPolicy: human
+        # Ordered regex rules, evaluated before the tool table. `field` selects
+        # what the pattern is matched against: `reason` (default), `toolName`, or
+        # `arguments`.
+        rules: []
+        # Reviewer model, prompt, and size limits. `provider`/`model` unset means
+        # the reviewer inherits the calling agent's own route.
+        reviewer:
+          timeoutMs: 60000
+          maxTokens: 1024
+          temperature: 0
+          argumentMaxChars: 4000
+          argumentsBudgetChars: 16000
+          # policyText: |            # replaces the shipping ruling policy
+          #   <your policy wording>
+          # guidance: <extra deployment-specific guidance>
+        # Transcript evidence handed to the reviewer; `turns: 0` sends none.
+        context:
+          turns: 2
+          maxChars: 6000
+          includeAssistant: true
+          includeToolActivity: true
+        # Risk gate: an allow verdict above this grade is not auto-allowed.
+        maxAutoAllowRisk: medium
+        onRiskExceeded: delegate
+        # Reviewer said it could not decide.
+        onUncertain: delegate
+        # Reviewer crashed, timed out, or answered off-schema. `rejected` is the
+        # fail-closed stance; `delegate` hands the request to the human chain.
+        onReviewerFailure: rejected
+        # Per-turn reviewer budget, so a loop cannot bill unlimited reviews.
+        budget:
+          maxReviewsPerTurn: 20
+          onExhausted: delegate
+        # Rejection circuit breaker, matching Codex's per-turn denial breaker:
+        # stop escalating after repeated refusals instead of looping.
+        circuitBreaker:
+          consecutiveDenials: 3
+          windowDenials: 10
+          windowSize: 50
+          action: delegate
+        # One-shot `/approval-review approve [n]` authorization.
+        override:
+          ttlMs: 300000
+          maxPending: 10
+        reasonMaxChars: 2000
+        # Append the reviewer's rationale to the refused tool result the model
+        # reads. This is also what makes the card's rationale durable, so turning
+        # it off costs the model its explanation AND the card its reason line.
+        feedReasonToModel: true
+        language: en

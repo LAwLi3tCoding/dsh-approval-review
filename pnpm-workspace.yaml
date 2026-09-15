@@ -1,0 +1,5 @@
+# pnpm settings for this standalone plugin repo. `allowBuilds` names the build
+# scripts pnpm may run; `esbuild` is pulled in by tsdown/vitest and needs its
+# postinstall to place its native binary.
+allowBuilds:
+  esbuild: true
