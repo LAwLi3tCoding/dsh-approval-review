@@ -12,7 +12,6 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 import type { ApprovalRequestEvent } from '@deepseek-ai/dsh-user-approval/types'
@@ -43,7 +42,7 @@ import {
   type ReviewerRoute,
   type TranscriptLine,
 } from './reviewer.ts'
-import type { ReviewVerdict } from './review-types.ts'
+import type { ReviewVerdict, ToolPolicy } from './review-types.ts'
 import { ReviewSessions, type GuardLimits } from './review-session.ts'
 import { VerdictCache } from './verdict-cache.ts'
 import { runSubagentReviewer } from './subagent-reviewer.ts'
@@ -56,6 +55,24 @@ export interface Refusal {
   readonly verdict?: ReviewVerdict
   /** Whether the model should be told to stop rather than retry a workaround. */
   readonly hardStop: boolean
+}
+
+/**
+ * An allow verdict this plugin resolved, awaiting delivery into the accepted
+ * tool result.
+ *
+ * A refusal rides the tool result because an approval outcome is a closed
+ * vocabulary with no room for a rationale. An allow has the same problem: the
+ * `approval/decided` event records `allowed-once` and nothing else, so without
+ * this carrier the ledger can show that an action ran but never why it was
+ * allowed. The marker is the same one refusals use, so the fold parses both
+ * through one inverse.
+ */
+export interface Allowance {
+  /** The marker text appended to the tool result. */
+  readonly marker: string
+  /** The verdict, for logging. */
+  readonly verdict?: ReviewVerdict
 }
 
 /** Build the guard limits the runtime consults. */
@@ -79,6 +96,17 @@ export class ReviewRuntime {
   private readonly sessions = new ReviewSessions()
   /** Refusals by callId, consumed by the `tools/post-execute` listener. */
   private readonly refusals = new Map<string, Refusal>()
+  /** Allow verdicts by callId, consumed by the `tools/post-execute` listener. */
+  private readonly allowances = new Map<string, Allowance>()
+  /**
+   * Session ids of reviewer children currently in flight. A reviewer child must
+   * never be reviewed by the answerer it is serving: with `read`/`glob`/`grep`
+   * alone it raises no approval, but a deployment that widens `reviewer.tools`
+   * would otherwise let the reviewer's own escalations recurse into this
+   * answerer. Populated when the child is established (before it can ask) and
+   * cleared when its run settles.
+   */
+  private readonly reviewerSessions = new Set<string>()
   /** Latest folded audit state per session, for the live view defaults. */
   private readonly auditStates = new WeakMap<Session, AuditState>()
   /** Reused verdicts for identical actions, when the evidence allows it. */
@@ -108,6 +136,19 @@ export class ReviewRuntime {
   reviewerModelFor(session: Session): string | undefined {
     const override = this.auditStates.get(session)?.modelOverride
     const chosen = override ?? this.config.reviewer.model
+    return chosen === undefined || chosen.length === 0 ? undefined : chosen
+  }
+
+  /**
+   * The reviewer provider in force for one session: the session override when
+   * set, else the deployment config, else `undefined` so the reviewer child
+   * inherits the calling agent's provider.
+   * @param session - the session being reviewed for.
+   * @returns the provider id, or undefined to inherit.
+   */
+  reviewerProviderFor(session: Session): string | undefined {
+    const override = this.auditStates.get(session)?.providerOverride
+    const chosen = override ?? this.config.reviewer.provider
     return chosen === undefined || chosen.length === 0 ? undefined : chosen
   }
 
@@ -159,7 +200,40 @@ export class ReviewRuntime {
       maxReviewsPerTurn: this.config.budget.maxReviewsPerTurn,
       breakerTrips: state => breaker(state.denialsStreak, state.window),
       defaultReviewerModel: this.config.reviewer.model ?? '',
+      defaultReviewerProvider: this.config.reviewer.provider ?? '',
+      resolvePolicy: (toolName, reason, argumentsText) => this.resolvePolicy(toolName, reason, argumentsText),
     })
+  }
+
+  /**
+   * Re-derive the routing policy of one request from the deployment config. The
+   * fold runs this so an `approval/asked` row states the policy that actually
+   * routed it instead of claiming every request was reviewed.
+   *
+   * It NEVER throws, unlike the decision path: `resolveToolPolicy` fails loud on
+   * an invalid rule pattern, and a throwing projection `apply` would take down
+   * the whole fold for the session — the card would go blank because of a
+   * misconfigured regex. The decision path keeps the loud failure where an
+   * operator can see it.
+   * @param toolName - the tool the request is about.
+   * @param reason - the asker's reason, matched by `field: 'reason'` rules.
+   * @param argumentsText - the argument text, matched by `field: 'arguments'` rules.
+   * @returns the effective policy and the rule that selected it.
+   */
+  resolvePolicy(
+    toolName: string,
+    reason: string | undefined,
+    argumentsText: string,
+  ): { readonly policy: ToolPolicy; readonly source: string } {
+    try {
+      const resolved = resolveToolPolicy(this.config, toolName, reason, argumentsText)
+      return { policy: resolved.policy, source: resolved.source }
+    } catch (error: unknown) {
+      return {
+        policy: this.config.defaultPolicy,
+        source: `unresolved (${error instanceof Error ? error.message : String(error)})`,
+      }
+    }
   }
 
   /** Snapshot the live counters the card overlays on the folded ledger. */
@@ -172,6 +246,7 @@ export class ReviewRuntime {
         maxReviewsPerTurn: this.config.budget.maxReviewsPerTurn,
         breakerTrips: live.circuitOpen,
         defaultReviewerModel: this.config.reviewer.model ?? '',
+        defaultReviewerProvider: this.config.reviewer.provider ?? '',
       }),
       consecutiveDenials: live.consecutiveDenials,
       pendingOverrides: live.pendingOverrides,
@@ -232,6 +307,10 @@ export class ReviewRuntime {
     const session = req.agent.session
     if (!this.config.enabled) return await next()
     if (!this.isEnabled(session)) return await next()
+    // The reviewer's own child session is never reviewed: a widened
+    // `reviewer.tools` must not let the reviewer's asks recurse into the
+    // answerer that is serving it.
+    if (this.isReviewerSession(session)) return await next()
     if (!this.presetAllows(session)) return await next()
 
     const rawArguments = this.argumentsFor(session, req.callId)
@@ -322,10 +401,21 @@ export class ReviewRuntime {
     const callId = req.callId
     /* v8 ignore next -- callers reject callId-less requests before reaching here */
     if (callId === undefined) return await next()
-    const route = resolveReviewerRoute(this.config.reviewer, {
-      provider: req.agent.options.provider,
-      model: req.agent.options.model,
-    })
+    // The session's `/approval-review model <id>` override outranks the
+    // deployment default in BOTH reviewer modes. Resolving it into the route
+    // here — rather than only in the subagent dispatch below — is what keeps
+    // `mode: direct` from silently ignoring the command.
+    const route = resolveReviewerRoute(
+      {
+        ...this.config.reviewer,
+        provider: this.reviewerProviderFor(session),
+        model: this.reviewerModelFor(session),
+      },
+      {
+        provider: req.agent.options.provider,
+        model: req.agent.options.model,
+      },
+    )
     if (route === undefined) {
       // No route means no reviewer; the human chain is the only safe owner.
       this.ctx.logger('dsh-approval-review').warn(
@@ -368,12 +458,15 @@ export class ReviewRuntime {
     this.sessions.noteReview(session)
     const result = this.config.reviewer.mode === 'subagent'
       ? await runSubagentReviewer(this.ctx, {
-        ...this.config.reviewer.provider === undefined ? {} : { provider: this.config.reviewer.provider },
+        ...this.reviewerProviderFor(session) === undefined ? {} : { provider: this.reviewerProviderFor(session)! },
         ...this.reviewerModelFor(session) === undefined ? {} : { model: this.reviewerModelFor(session)! },
         reviewerProvider: this.config.reviewer.subagentProvider,
         reviewerTools: this.config.reviewer.tools,
         timeoutMs: this.config.reviewer.timeoutMs,
         parent: req.agent,
+        // The child is registered as soon as it exists, so its own approval
+        // asks (a widened `reviewer.tools`) can never reach this answerer.
+        registerChildSession: childSessionId => this.registerReviewerSession(childSessionId),
         evidence: {
           toolName: req.toolName,
           argumentsText,
@@ -447,6 +540,23 @@ export class ReviewRuntime {
 
     if (gate.action === 'allow') {
       this.recordDecision(session, false)
+      // The allow verdict gets the same durable carrier a refusal does, for the
+      // same reason: `approval/decided` records the outcome and nothing else, so
+      // this marker is the only place the rationale can survive into the log.
+      if (this.config.recordAllowedVerdicts) {
+        this.putAllowance(callId, {
+          marker: formatReviewMarker({
+            reason: verdict?.reason ?? gate.note,
+            ...verdict?.suggestion === undefined ? {} : { suggestion: verdict.suggestion },
+            ...verdict?.risk === undefined ? {} : { risk: verdict.risk },
+            // A route is only meaningful when a reviewer actually answered.
+            ...verdict === undefined ? {} : { reviewerRoute: `${route.provider}/${route.model}` },
+            durationMs,
+            uncertain: verdict?.uncertain === true,
+          }),
+          ...verdict === undefined ? {} : { verdict },
+        })
+      }
       this.ctx.logger('dsh-approval-review').info(
         `allowed ${req.toolName} (${policySource}): ${verdict?.reason ?? gate.note}`,
       )
@@ -510,6 +620,15 @@ export class ReviewRuntime {
     }
   }
 
+  /** Stash the allow marker for the post-execute listener. */
+  private putAllowance(callId: string, allowance: Allowance): void {
+    this.allowances.set(callId, allowance)
+    if (this.allowances.size > 512) {
+      const oldest = this.allowances.keys().next()
+      if (!oldest.done) this.allowances.delete(oldest.value)
+    }
+  }
+
   /**
    * Take the refusal stashed for one call.
    * @param callId - the call identity.
@@ -519,6 +638,38 @@ export class ReviewRuntime {
     const refusal = this.refusals.get(callId)
     if (refusal !== undefined) this.refusals.delete(callId)
     return refusal
+  }
+
+  /**
+   * Take the allow verdict stashed for one call.
+   * @param callId - the call identity.
+   * @returns the allowance, removed from the map.
+   */
+  takeAllowance(callId: string): Allowance | undefined {
+    const allowance = this.allowances.get(callId)
+    if (allowance !== undefined) this.allowances.delete(callId)
+    return allowance
+  }
+
+  /**
+   * Whether a session belongs to this plugin's own reviewer dispatch.
+   * @param session - the session raising the approval request.
+   * @returns true when the request comes from a reviewer child in flight.
+   */
+  isReviewerSession(session: Session): boolean {
+    return this.reviewerSessions.has(String(session.header.id))
+  }
+
+  /**
+   * Register a reviewer child whose asks must never be reviewed by this
+   * answerer. Called as soon as the child session exists — before its first step
+   * can raise an approval — and released when its run settles.
+   * @param sessionId - the child session id.
+   * @returns the release function; idempotent.
+   */
+  registerReviewerSession(sessionId: string): () => void {
+    this.reviewerSessions.add(sessionId)
+    return () => { this.reviewerSessions.delete(sessionId) }
   }
 
   /** Read the raw argument JSON of a tool call from the session log. */
@@ -602,19 +753,4 @@ export function blocksToText(blocks: readonly ContentBlock[]): string {
   }
   walk(blocks)
   return out.join('\n')
-}
-
-/**
- * Whether an agent belongs to this plugin's own reviewer dispatch. The reviewer
- * is a plain model call rather than an agent, so no live agent carries this
- * marker today; the check keeps a future agent-based reviewer from recursing
- * into the answerer it is serving.
- * @param agent - the agent to test.
- * @returns true when the agent is the reviewer.
- */
-export function isReviewerAgent(agent: Agent): boolean {
-  // A reviewer agent, if one is ever introduced, announces itself through the
-  // delegation label the subagent seam records on the child session header.
-  const header = agent.session.header as { title?: unknown } | undefined
-  return typeof header?.title === 'string' && header.title.startsWith('approval-review:')
 }

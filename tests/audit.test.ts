@@ -185,6 +185,57 @@ describe('applyAuditEvent', () => {
     expect(applyAuditEvent(state, orphan, DEFAULTS)).toBe(state)
   })
 
+  it('folds an ALLOW marker onto an allowed record', () => {
+    // The allow verdict rides the accepted tool result exactly like a refusal,
+    // which is what gives an allowed row a rationale in the card.
+    const state = fold([
+      event('turn/start', { turn: 1 }),
+      event('tool/call', { turn: 1, step: 0, callId: 'c', name: 'bash', arguments: '{"command":"ls"}' }),
+      event('approval/asked', { id: 'a', toolName: 'bash', callId: 'c' }),
+      event('approval/decided', { id: 'a', outcome: 'allowed-once' }),
+      event('tool/result', {
+        turn: 1,
+        step: 0,
+        message: {
+          role: 'user',
+          source: { kind: 'tool', toolName: 'bash', callId: 'c' },
+          content: [{
+            type: 'tool-result',
+            toolCallId: 'c',
+            content: [{
+              type: 'text',
+              text: `listing\n${formatReviewMarker({ reason: 'read-only listing', risk: 'low' })}`,
+            }],
+          }],
+        },
+      }),
+    ])
+    expect(state.records[0]!.refused).toBe(false)
+    expect(state.records[0]!.reason).toBe('read-only listing')
+    expect(state.records[0]!.risk).toBe('low')
+  })
+
+  it('stamps the row with the policy that actually routed it', () => {
+    const resolvePolicy = (toolName: string): { policy: 'ai' | 'human'; source: string } =>
+      toolName === 'bash' ? { policy: 'ai', source: 'reviewTools ("bash")' } : { policy: 'human', source: 'defaultPolicy' }
+    const state = [
+      event('turn/start', { turn: 1 }),
+      event('approval/asked', { id: 'a', toolName: 'bash' }),
+      event('approval/asked', { id: 'b', toolName: 'web_fetch' }),
+    ].reduce((acc, next) => applyAuditEvent(acc, next, { ...DEFAULTS, resolvePolicy }), initAuditState())
+    // Newest first: `web_fetch` was asked last, so it heads the ledger.
+    expect(state.records[0]!).toMatchObject({ toolName: 'web_fetch', policy: 'human', policySource: 'defaultPolicy' })
+    expect(state.records[1]!).toMatchObject({ toolName: 'bash', policy: 'ai', policySource: 'reviewTools ("bash")' })
+  })
+
+  it('falls back to the historical ai/unrecorded stamp without a resolver', () => {
+    const state = fold([
+      event('turn/start', { turn: 1 }),
+      event('approval/asked', { id: 'a', toolName: 'bash' }),
+    ])
+    expect(state.records[0]!).toMatchObject({ policy: 'ai', policySource: 'unrecorded' })
+  })
+
   it('caps the retained records at the newest MAX_RECORDS', () => {
     const events: SessionEvent[] = [event('turn/start', { turn: 1 })]
     for (let index = 0; index < MAX_RECORDS + 20; index += 1) {
@@ -241,14 +292,14 @@ describe('applyAuditEvent', () => {
 
 describe('auditView', () => {
   it('applies the deployment switch default when the log carries no override', () => {
-    const view = auditView(initAuditState(), { enabledByDefault: false, maxReviewsPerTurn: 7, breakerTrips: false, defaultReviewerModel: '' })
+    const view = auditView(initAuditState(), { enabledByDefault: false, maxReviewsPerTurn: 7, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerModel: '' })
     expect(view.enabled).toBe(false)
     expect(view.maxReviewsPerTurn).toBe(7)
   })
 
   it('prefers the logged override over the default', () => {
     const state = fold([event('command/run', { commandId: 'x', name: COMMAND_NAME, args: 'off', source: 'user' })])
-    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 7, breakerTrips: false, defaultReviewerModel: '' })
+    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 7, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerModel: '' })
     expect(view.enabled).toBe(false)
   })
 
@@ -258,7 +309,7 @@ describe('auditView', () => {
       event('approval/asked', { id: 'a', toolName: 'bash' }),
       event('approval/decided', { id: 'a', outcome: 'rejected' }),
     ])
-    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 7, breakerTrips: true, defaultReviewerModel: '' })
+    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 7, breakerTrips: true, defaultReviewerProvider: '', defaultReviewerModel: '' })
     expect(view.refused).toBe(1)
     expect(view.total).toBe(1)
     expect(view.consecutiveDenials).toBe(1)
@@ -323,21 +374,48 @@ describe('review marker round-trip', () => {
 describe('reviewer-model override', () => {
   const withModel = (args: string) =>
     fold([event('command/run', { commandId: 'x', name: COMMAND_NAME, args, source: 'user' })])
+  const command = (name: string, args: string) =>
+    event('command/run', { commandId: 'y', name, args, source: 'user' })
 
   it('records a durable model override from the command', () => {
     const state = withModel('model deepseek-chat')
     expect(state.modelOverride).toBe('deepseek-chat')
-    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerModel: 'default-model' })
+    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerModel: 'default-model' })
     expect(view.reviewerModel).toBe('deepseek-chat')
   })
 
+  it('records a provider alongside the model when the command names both', () => {
+    const state = withModel('model openai-codex/gpt-5.6-luna')
+    expect(state.modelOverride).toBe('gpt-5.6-luna')
+    expect(state.providerOverride).toBe('openai-codex')
+    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerModel: '' })
+    expect(view.reviewerProvider).toBe('openai-codex')
+    expect(view.reviewerModel).toBe('gpt-5.6-luna')
+  })
+
+  it('drops a stale provider when the command names only a model', () => {
+    // The two halves travel together: keeping the old provider is how a session
+    // ends up asking the wrong vendor for a model id.
+    const withProvider = withModel('model openai-codex/gpt-5.6-luna')
+    const state = applyAuditEvent(withProvider, command('approval-review', 'model deepseek-chat'), DEFAULTS)
+    expect(state.providerOverride).toBeUndefined()
+    expect(state.modelOverride).toBe('deepseek-chat')
+  })
+
+  it('clears both halves with `model default`', () => {
+    const both = withModel('model openai-codex/gpt-5.6-luna')
+    const state = applyAuditEvent(both, command('approval-review', 'model default'), DEFAULTS)
+    expect(state.providerOverride).toBeUndefined()
+    expect(state.modelOverride).toBeUndefined()
+  })
+
   it('falls back to the deployment default without an override', () => {
-    const view = auditView(initAuditState(), { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerModel: 'default-model' })
+    const view = auditView(initAuditState(), { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerModel: 'default-model' })
     expect(view.reviewerModel).toBe('default-model')
   })
 
   it('reports an empty string when nothing is configured', () => {
-    const view = auditView(initAuditState(), { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerModel: '' })
+    const view = auditView(initAuditState(), { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerModel: '' })
     expect(view.reviewerModel).toBe('')
   })
 
@@ -348,8 +426,20 @@ describe('reviewer-model override', () => {
     expect(Object.hasOwn(cleared, 'modelOverride')).toBe(false)
   })
 
-  it('keeps a model id that contains spaces', () => {
-    expect(withModel('model vendor/some model').modelOverride).toBe('vendor/some model')
+  it('keeps the whole id when it has spaces and no provider half', () => {
+    const state = withModel('model my model v2')
+    expect(state.modelOverride).toBe('my model v2')
+    expect(state.providerOverride).toBeUndefined()
+  })
+
+  it('splits a single provider slash, and only that one', () => {
+    const split = withModel('model vendor/some model')
+    expect(split.providerOverride).toBe('vendor')
+    expect(split.modelOverride).toBe('some model')
+    // Two slashes is a model id, not a provider pair.
+    const unsplit = withModel('model org/family/model')
+    expect(unsplit.providerOverride).toBeUndefined()
+    expect(unsplit.modelOverride).toBe('org/family/model')
   })
 
   it('leaves the override alone for an unrelated command', () => {

@@ -16,6 +16,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import { apply, Config } from '../src/index.ts'
+import { ReviewRuntime } from '../src/runtime.ts'
 import type { Config as ConfigShape } from '../src/config.ts'
 
 /** A scripted reviewer: answers with a fixed verdict or throws. */
@@ -59,7 +60,7 @@ function fakeAgent(seed: Array<{ type: string; data?: Record<string, unknown> }>
     options: { provider: 'test', model: 'test-model' },
     session: {
       id: 'session-1',
-      header: { title: undefined },
+      header: { id: 'session-1', title: undefined },
       get seq() { return events.length },
       eventAt: (seq: number) => events[seq],
       append: (type: string, data: Record<string, unknown>) => {
@@ -358,6 +359,26 @@ describe('approval audit trail', () => {
     expect(text).toContain('[redacted]')
   })
 
+  it('lets the per-session `/approval-review model` override the reviewer model', async () => {
+    const { ctx, reviewer } = await mounted()
+    const { agent } = fakeAgent([
+      { type: 'turn/start', data: { turn: 1 } },
+      { type: 'command/run', data: { commandId: 'c1', name: 'approval-review', args: 'model deepseek-v4-pro', source: 'user' } },
+    ])
+    // The runtime learns the choice from the committed event stream.
+    emitSessionEvent(ctx, agent.session, { type: 'turn/start', data: { turn: 1 } })
+    emitSessionEvent(ctx, agent.session, {
+      type: 'command/run',
+      data: { commandId: 'c1', name: 'approval-review', args: 'model deepseek-v4-pro', source: 'user' },
+    })
+
+    await ctx.approval.request(requestOf(agent, 'bash', 'c'))
+
+    // Regression: `mode: direct` used to build its route from config alone, so
+    // the command reported success while the reviewer kept the old model.
+    expect(reviewer.calls[0]!.model).toBe('deepseek-v4-pro')
+  })
+
   it('respects a reviewer route configured separately from the agent', async () => {
     const { ctx, reviewer } = await mounted({ reviewer: { provider: 'test', model: 'reviewer-model' } })
     const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
@@ -385,7 +406,12 @@ describe('approval audit trail', () => {
 
 describe('refusal rationale delivery', () => {
   /** Drive the plugin's own `tools/post-execute` listener for one call. */
-  async function postExecute(ctx: Context, callId: string, kind: 'block' | 'accept' = 'block') {
+  async function postExecute(
+    ctx: Context,
+    callId: string,
+    kind: 'block' | 'accept' = 'block',
+    isError = false,
+  ) {
     const decision = kind === 'block'
       ? { kind: 'block' as const, feedback: [{ type: 'text' as const, text: 'Error: the user rejected tool "bash"' }] }
       : { kind: 'accept' as const, content: [{ type: 'text' as const, text: 'ok' }] }
@@ -395,7 +421,7 @@ describe('refusal rationale delivery', () => {
     return await dispatch(
       'tools/post-execute',
       { callId, name: 'bash', arguments: {}, agent: undefined, signal: new AbortController().signal },
-      decision,
+      { ...decision, isError },
       async () => decision,
     )
   }
@@ -443,6 +469,169 @@ describe('refusal rationale delivery', () => {
 
     const decision = await postExecute(ctx, 'c', 'accept')
     expect(decision.kind).toBe('accept')
+  })
+
+  it('carries the rationale into an error result the chain accepted', async () => {
+    // A refused sandbox escalation never reaches `block`: the tool body returns
+    // an error result and the chain accepts it, so the marker has to ride that
+    // shape too or the model is refused with no reason at all.
+    const { ctx, reviewer } = await mounted()
+    reviewer.answer = '{"decision":"deny","risk":"high","reason":"that command probed for credentials"}'
+    const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls /tmp/x"}'))
+    await ctx.approval.request(requestOf(agent, 'bash', 'c'))
+
+    const decision = await postExecute(ctx, 'c', 'accept', true) as unknown as { content?: { type: string; text?: string }[] }
+    const text = (decision.content ?? []).map(block => block.text ?? '').join('\n')
+    expect(text).toContain('that command probed for credentials')
+    expect(text).toContain('[approval-review]')
+  })
+
+  it('does not smuggle a refusal into an accepted SUCCESS', async () => {
+    const { ctx, reviewer } = await mounted()
+    reviewer.answer = '{"decision":"deny","risk":"high","reason":"no"}'
+    const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
+    await ctx.approval.request(requestOf(agent, 'bash', 'c'))
+
+    // A successful call must not be labelled a refusal; only an error shape is.
+    const decision = await postExecute(ctx, 'c', 'accept', false) as unknown as { content?: { type: string; text?: string }[] }
+    const text = (decision.content ?? []).map(block => block.text ?? '').join('\n')
+    expect(text).toBe('ok')
+  })
+
+  it('carries an ALLOW verdict into the accepted tool result', async () => {
+    const { ctx, reviewer } = await mounted()
+    reviewer.answer = '{"decision":"allow","risk":"low","reason":"read-only listing inside the workspace"}'
+    const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
+    await ctx.approval.request(requestOf(agent, 'bash', 'c'))
+
+    const decision = await postExecute(ctx, 'c', 'accept') as unknown as { content?: { type: string; text?: string }[] }
+    const text = (decision.content ?? []).map(block => block.text ?? '').join('\n')
+    // The original content survives; the verdict is appended after it.
+    expect(text).toContain('ok')
+    expect(text).toContain('[approval-review]')
+    expect(text).toContain('read-only listing inside the workspace')
+    expect(text).toContain('risk: low')
+  })
+
+  it('drops the allow marker when recordAllowedVerdicts is off', async () => {
+    const { ctx, reviewer } = await mounted({ recordAllowedVerdicts: false })
+    reviewer.answer = '{"decision":"allow","risk":"low","reason":"fine"}'
+    const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
+    await ctx.approval.request(requestOf(agent, 'bash', 'c'))
+
+    const decision = await postExecute(ctx, 'c', 'accept') as unknown as { content?: { type: string; text?: string }[] }
+    const text = (decision.content ?? []).map(block => block.text ?? '').join('\n')
+    expect(text).toBe('ok')
+  })
+})
+
+describe('reviewer recursion guard', () => {
+  /** Build a runtime directly so the guard can be driven without a child agent. */
+  function runtimeWith(overrides: Record<string, unknown> = {}) {
+    const config = (Config as unknown as (value: unknown) => ConfigShape)({
+      ...overrides,
+      reviewer: { mode: 'direct', ...(overrides['reviewer'] as Record<string, unknown> | undefined) },
+    })
+    return new ReviewRuntime(new Context(), config)
+  }
+
+  it('delegates a request raised by a registered reviewer child', async () => {
+    const runtime = runtimeWith()
+    const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
+    const release = runtime.registerReviewerSession('session-1')
+    let delegated = false
+    const outcome = await runtime.answer(requestOf(agent, 'bash', 'c'), async () => {
+      delegated = true
+      return 'unavailable'
+    })
+    expect(delegated).toBe(true)
+    expect(outcome).toBe('unavailable')
+    release()
+  })
+
+  it('stops delegating once the child run has settled', async () => {
+    const runtime = runtimeWith()
+    const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
+    runtime.registerReviewerSession('session-1')()
+    expect(runtime.isReviewerSession({ header: { id: 'session-1' } } as never)).toBe(false)
+    // With the guard released the plugin tries to review, and this bare runtime
+    // has no reviewer route — so the fail-closed default answers, not `next()`.
+    let delegated = false
+    const outcome = await runtime.answer(requestOf(agent, 'bash', 'c'), async () => {
+      delegated = true
+      return 'unavailable'
+    })
+    expect(delegated).toBe(false)
+    expect(outcome).toBe('rejected')
+  })
+})
+
+describe('the projection the card reads', () => {
+  /** Mount the plugin with a projection-registry stub that captures its unit. */
+  async function withProjection(overrides: Record<string, unknown> = {}) {
+    const ctx = new Context()
+    await ctx.plugin(ApprovalService)
+    await ctx.plugin(CommandRuntime)
+    const reviewer = new ScriptedReviewer()
+    new LlmRuntime(ctx).registerAdapter(['test'], reviewer)
+    let definition: { apply(state: unknown, event: unknown): unknown; init(): unknown } | undefined
+    ctx.provide('sessionProjections', {
+      register: (registered: Record<string, unknown>) => { definition = registered as never },
+      snapshot: () => ({ values: {} }),
+    } as never)
+    apply(ctx, (Config as unknown as (value: unknown) => ConfigShape)({
+      ...overrides,
+      reviewer: { mode: 'direct', ...(overrides['reviewer'] as Record<string, unknown> | undefined) },
+    }))
+    // `ctx.inject(['sessionProjections'], …)` settles on a later tick.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    return definition
+  }
+
+  /** Fold one `approval/asked` through the captured projection. */
+  function foldAsk(unit: { apply(state: unknown, event: unknown): unknown; init(): unknown }, toolName: string) {
+    const state = unit.apply(unit.init(), {
+      type: 'approval/asked',
+      seq: 0,
+      time: 0,
+      data: { id: 'a', toolName, reason: 'why' },
+    }) as { records: Array<Record<string, unknown>> }
+    return state.records[0]!
+  }
+
+  it('stamps a delegated row with the policy that routed it, not `ai`', async () => {
+    const unit = await withProjection()
+    expect(unit).toBeDefined()
+    // `web_fetch` is not in reviewTools, so this deployment hands it to a human.
+    expect(foldAsk(unit!, 'web_fetch')).toMatchObject({ policy: 'human', policySource: 'defaultPolicy' })
+  })
+
+  it('stamps a listed tool as reviewed, naming the pattern that matched', async () => {
+    const unit = await withProjection()
+    const record = foldAsk(unit!, 'bash')
+    expect(record).toMatchObject({ policy: 'ai' })
+    expect(String(record['policySource'])).toContain('bash')
+  })
+
+  it('honours configured risk rules when stamping the row', async () => {
+    // `foldAsk` asks with reason "why", and the rule matches on `reason`.
+    const unit = await withProjection({
+      rules: [{ pattern: 'why', policy: 'never', field: 'reason' }],
+    })
+    const record = foldAsk(unit!, 'web_fetch')
+    expect(record).toMatchObject({ policy: 'never' })
+    expect(String(record['policySource'])).toContain('rules[0]')
+  })
+
+  it('never lets a broken rule pattern take the projection down', async () => {
+    // `resolveToolPolicy` throws on an uncompilable pattern. That is right on
+    // the decision path and fatal inside a projection fold, so the fold's
+    // resolver must degrade instead of propagating.
+    const unit = await withProjection({
+      rules: [{ pattern: '(?i)why', policy: 'never', field: 'reason' }],
+    })
+    const record = foldAsk(unit!, 'web_fetch')
+    expect(record).toMatchObject({ policy: 'human', policySource: expect.stringContaining('unresolved') })
   })
 })
 

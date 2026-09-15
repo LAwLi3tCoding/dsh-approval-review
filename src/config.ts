@@ -163,6 +163,17 @@ export interface Config {
   readonly reasonMaxChars: number
   /** Append the reviewer rationale to the refused tool result the model sees. */
   readonly feedReasonToModel: boolean
+  /**
+   * Append the reviewer's ALLOW verdict to the accepted tool result.
+   *
+   * A refusal already carries its rationale into the tool result, which is the
+   * only channel this plugin can write durably without inventing a session event
+   * type. An allow verdict has no such carrier, so without this the audit ledger
+   * can show THAT an action was allowed but never WHY. Turning it on costs one
+   * marker block (four short lines) in the model's context per auto-allowed
+   * call; turning it off leaves allowed rows rationale-less in the card.
+   */
+  readonly recordAllowedVerdicts: boolean
   /** Language of the `/approval-review` command output. */
   readonly language: 'en' | 'zh'
 }
@@ -301,6 +312,10 @@ export const Config: Schema<Config> = Schema.object({
     .description('Character cap for any reason string this plugin emits.'),
   feedReasonToModel: Schema.boolean().default(true)
     .description('Append the reviewer rationale to the refused tool result the model sees.'),
+  recordAllowedVerdicts: Schema.boolean().default(true)
+    .description('Append the reviewer allow verdict to the accepted tool result, so the audit ledger '
+      + 'can show why an action was allowed. Costs one short marker block in the model context per '
+      + 'auto-allowed call.'),
   language: Schema.union(['en', 'zh'] as const).default('en')
     .description('Language of `/approval-review` command output.'),
 })

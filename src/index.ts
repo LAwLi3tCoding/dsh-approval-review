@@ -65,6 +65,7 @@ function emptyView(config: ConfigShape): ReturnType<typeof auditView> {
       maxReviewsPerTurn: config.budget.maxReviewsPerTurn,
       breakerTrips: false,
       defaultReviewerModel: config.reviewer.model ?? '',
+      defaultReviewerProvider: config.reviewer.provider ?? '',
     },
   )
 }
@@ -89,22 +90,54 @@ export function apply(ctx: Context, config: ConfigShape): void {
 
   // The refusal rationale rides the refused tool result: an approval outcome is a
   // closed vocabulary, so the tool result is the only channel that reaches the
-  // model — and the only one the audit ledger can fold back for the card.
-  ctx.on('tools/post-execute', async (exec, _result, next) => {
-    if (!config.feedReasonToModel) return await next()
+  // model — and the only one the audit ledger can fold back for the card. An
+  // ALLOW verdict has the same problem and takes the same channel, gated by
+  // `recordAllowedVerdicts` because it costs the model one marker block.
+  ctx.on('tools/post-execute', async (exec, result, next) => {
+    // Both are consumed unconditionally: a stashed decision belongs to exactly
+    // one call, and leaving it in the map only leaks it until the next eviction.
     const refusal = runtime.takeRefusal(exec.callId)
-    if (refusal === undefined) return await next()
-    // Let the rest of the chain decide first, then append the rationale to the
-    // refusal it produced: a pre-execute deny materializes as a block whose
-    // feedback becomes the tool result text the model reads.
+    const allowance = runtime.takeAllowance(exec.callId)
+    if (refusal === undefined && allowance === undefined) return await next()
+    if (refusal !== undefined && config.feedReasonToModel) {
+      // Let the rest of the chain decide first, then append the rationale to the
+      // refusal it produced. Two shapes carry it, and BOTH need it:
+      //  - a pre-execute deny materializes as a `block` whose feedback becomes
+      //    the tool result text the model reads;
+      //  - a denial raised INSIDE the tool body — a refused sandbox escalation
+      //    (`sandbox_permissions`) is the common one — surfaces as an ordinary
+      //    error result, which the chain accepts. Without this second shape the
+      //    model is told "no" with no reason, and the ledger has none either.
+      const decision = await next()
+      const guidance = refusal.hardStop
+        ? '\nDo not pursue the same outcome through a workaround, an indirect route, or by loosening the restriction. Continue only with a materially safer alternative, or stop and ask the user.'
+        : ''
+      const text = `${refusal.marker}${guidance}`
+      if (decision.kind === 'block') {
+        return { ...decision, feedback: [...decision.feedback, { type: 'text' as const, text }] }
+      }
+      if (decision.kind === 'accept' && result.isError
+        && (decision as { value?: unknown }).value === undefined) {
+        return {
+          kind: 'accept' as const,
+          content: [...result.content, { type: 'text' as const, text }],
+          ...decision.additionalContexts === undefined ? {} : { additionalContexts: decision.additionalContexts },
+        }
+      }
+      return decision
+    }
+    if (allowance === undefined) return await next()
     const decision = await next()
-    if (decision.kind !== 'block') return decision
-    const guidance = refusal.hardStop
-      ? '\nDo not pursue the same outcome through a workaround, an indirect route, or by loosening the restriction. Continue only with a materially safer alternative, or stop and ask the user.'
-      : ''
+    if (decision.kind !== 'accept') return decision
+    // A value-projection accept carries an execution-local value that a content
+    // replacement would drop, so that shape is left exactly as the chain
+    // produced it. The verdict still reaches the log through `approval/decided`;
+    // only its rationale is skipped.
+    if ((decision as { value?: unknown }).value !== undefined) return decision
     return {
-      ...decision,
-      feedback: [...decision.feedback, { type: 'text' as const, text: `${refusal.marker}${guidance}` }],
+      kind: 'accept' as const,
+      content: [...result.content, { type: 'text' as const, text: allowance.marker }],
+      ...decision.additionalContexts === undefined ? {} : { additionalContexts: decision.additionalContexts },
     }
   })
 
@@ -127,8 +160,8 @@ export function apply(ctx: Context, config: ConfigShape): void {
           const cache = runtime.stats()
           const lines = [
             zh
-              ? `自动审批：${view.enabled ? '开启' : '关闭'}｜复核模式 ${config.reviewer.mode}${config.reviewer.mode === 'subagent' ? ` (${config.reviewer.subagentProvider})` : ''}｜模型 ${view.reviewerModel.length > 0 ? view.reviewerModel : '继承会话'}`
-              : `Automatic approval review: ${view.enabled ? 'on' : 'off'} | reviewer ${config.reviewer.mode}${config.reviewer.mode === 'subagent' ? ` (${config.reviewer.subagentProvider})` : ''} | model ${view.reviewerModel.length > 0 ? view.reviewerModel : 'inherit session'}`,
+              ? `自动审批：${view.enabled ? '开启' : '关闭'}｜复核模式 ${config.reviewer.mode}${config.reviewer.mode === 'subagent' ? ` (${config.reviewer.subagentProvider})` : ''}｜模型 ${view.reviewerModel.length > 0 ? `${view.reviewerProvider.length > 0 ? `${view.reviewerProvider}/` : ''}${view.reviewerModel}` : '继承会话'}`
+              : `Automatic approval review: ${view.enabled ? 'on' : 'off'} | reviewer ${config.reviewer.mode}${config.reviewer.mode === 'subagent' ? ` (${config.reviewer.subagentProvider})` : ''} | model ${view.reviewerModel.length > 0 ? `${view.reviewerProvider.length > 0 ? `${view.reviewerProvider}/` : ''}${view.reviewerModel}` : 'inherit session'}`,
             zh
               ? `本回合：复审 ${view.reviewsThisTurn}/${view.maxReviewsPerTurn}｜复核失败 ${runtime.failuresThisTurn(session)}/${config.maxFailuresPerTurn}｜连续否决 ${view.consecutiveDenials}`
               : `This turn: reviews ${view.reviewsThisTurn}/${view.maxReviewsPerTurn} | reviewer failures ${runtime.failuresThisTurn(session)}/${config.maxFailuresPerTurn} | consecutive denials ${view.consecutiveDenials}`,
@@ -193,8 +226,8 @@ export function apply(ctx: Context, config: ConfigShape): void {
             return {
               kind: 'success' as const,
               text: zh
-                ? `复核模型：${current.length > 0 ? current : '继承会话模型（未覆盖）'}\n用法：/approval-review model <模型 id>｜model default 恢复继承`
-                : `Reviewer model: ${current.length > 0 ? current : 'inherit the session model (no override)'}\nUsage: /approval-review model <id> | model default to inherit again`,
+                ? `复核模型：${current.length > 0 ? current : '继承会话模型（未覆盖）'}\n用法：/approval-review model [<provider>/]<模型 id>｜model default 恢复继承`
+                : `Reviewer model: ${current.length > 0 ? current : 'inherit the session model (no override)'}\nUsage: /approval-review model [<provider>/]<id> | model default to inherit again`,
             }
           }
           return {

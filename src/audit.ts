@@ -26,10 +26,39 @@ import type {} from '@deepseek-ai/dsh-session-projection/types'
 // Type-only: bring the `command/run` session-event declaration into scope so the
 // fold can narrow on it.
 import type {} from '@deepseek-ai/dsh-commands/types'
-import type { RiskLevel, ReviewOutcome } from './review-types.ts'
+import type { RiskLevel, ReviewOutcome, ToolPolicy } from './review-types.ts'
 
 /** The projection key the card reads. */
 export const AUDIT_PROJECTION_KEY = 'approvalReview'
+
+/**
+ * Resolve the routing policy of one approval request during the fold.
+ *
+ * The fold is a pure function of the log, so it cannot read the runtime's live
+ * decision: it re-derives the SAME policy table from the deployment config. The
+ * only input that differs from the runtime's is the argument text, which the
+ * ledger keeps bounded ({@link ARGUMENT_PREVIEW_MAX}); a `field: 'arguments'`
+ * rule whose match starts past that bound is therefore reported by its fallback
+ * table entry rather than by that rule.
+ */
+export type AuditPolicyResolver = (
+  toolName: string,
+  reason: string | undefined,
+  argumentsText: string,
+) => { readonly policy: ToolPolicy; readonly source: string }
+
+/** Fold inputs the log does not carry. */
+export interface AuditFoldDefaults {
+  /** Session-start value of the `/approval-review on|off` switch. */
+  readonly enabledByDefault: boolean
+  /**
+   * Policy resolver used to stamp each `approval/asked` row. Omitted means the
+   * row is stamped `ai`/`unrecorded`, which is only honest for a deployment
+   * that routes everything to the reviewer.
+   */
+  readonly resolvePolicy?: AuditPolicyResolver
+}
+
 
 /** Hard cap on retained records; the newest survive. */
 export const MAX_RECORDS = 200
@@ -115,6 +144,11 @@ export interface AuditView {
    * model).
    */
   readonly reviewerModel: string
+  /**
+   * Provider half of the effective reviewer route (`''` = the deployment
+   * default, which itself falls back to the calling agent's provider).
+   */
+  readonly reviewerProvider: string
 }
 
 /** Raw projection state; the wire view is derived from it. */
@@ -127,8 +161,15 @@ export interface AuditState {
   readonly turn: number
   readonly step: number
   readonly enabledOverride?: boolean
-  /** Durable per-session reviewer-model override, from `/approval-review model <id>`. */
+  /**
+   * Durable per-session reviewer ROUTE override, from
+   * `/approval-review model [<provider>/]<model>`. Both halves are written
+   * together so a cross-provider choice cannot end up asking the session's
+   * provider for a model it does not serve.
+   */
   readonly modelOverride?: string
+  /** Provider half of {@link modelOverride}; absent means the configured route. */
+  readonly providerOverride?: string
   readonly reviewsThisTurn: number
   readonly denialsStreak: number
   readonly window: readonly boolean[]
@@ -184,7 +225,7 @@ export function initAuditState(): AuditState {
 export function applyAuditEvent(
   state: AuditState,
   event: SessionEvent,
-  defaults: { readonly enabledByDefault: boolean },
+  defaults: AuditFoldDefaults,
 ): AuditState {
   switch (event.type) {
     case 'turn/start':
@@ -203,9 +244,15 @@ export function applyAuditEvent(
 
     case 'approval/asked': {
       // A `human`/`never` request still belongs on the card: the user asked for a
-      // record of every approval decision, not only the ones a model judged.
+      // record of every approval decision, not only the ones a model judged. The
+      // row carries the policy that ROUTED it, re-derived from the deployment
+      // config, so a delegated request never masquerades as a reviewed one.
       const seq = state.nextSeq
       const callId = event.data.callId
+      const preview = callId === undefined ? undefined : state.arguments[callId]
+      const routed = defaults.resolvePolicy === undefined
+        ? { policy: 'ai' as ToolPolicy, source: 'unrecorded' }
+        : defaults.resolvePolicy(event.data.toolName, event.data.reason, preview ?? '')
       const record: AuditRecord = {
         reviewId: event.data.id,
         seq,
@@ -214,12 +261,10 @@ export function applyAuditEvent(
         turn: state.turn,
         step: state.step,
         startedAt: Date.now(),
-        policy: 'ai',
-        policySource: 'unrecorded',
+        policy: routed.policy,
+        policySource: routed.source,
         ...event.data.reason === undefined ? {} : { askReason: event.data.reason },
-        ...callId === undefined || state.arguments[callId] === undefined
-          ? {}
-          : { argumentsPreview: state.arguments[callId] },
+        ...preview === undefined ? {} : { argumentsPreview: preview },
         refused: false,
         uncertain: false,
         overridden: state.pendingOverrides > 0,
@@ -264,14 +309,26 @@ export function applyAuditEvent(
       if (action === 'approve') return { ...state, pendingOverrides: state.pendingOverrides + 1 }
       if (action === 'model') {
         const value = args.split(/\s+/u).slice(1).join(' ').trim()
-        // `model default` clears the override back to the deployment default.
+        // `model default` clears both halves back to the deployment default.
         if (value.length === 0 || value === 'default') {
-          // Drop the key rather than set it to undefined: the state is persisted
-          // JSON, and an explicit undefined key is noise the cache has to carry.
-          const { modelOverride: _dropped, ...rest } = state
+          // Drop the keys rather than set them to undefined: the state is
+          // persisted JSON, and explicit undefined keys are noise the cache
+          // has to carry.
+          const { modelOverride: _m, providerOverride: _p, ...rest } = state
           return rest
         }
-        return { ...state, modelOverride: value }
+        // `[<provider>/]<model>`: a model id may itself contain `/` in some
+        // registries, so only an exact two-part split with a non-empty provider
+        // counts as the provider form.
+        const slash = value.indexOf('/')
+        if (slash > 0 && slash < value.length - 1 && !value.slice(slash + 1).includes('/')) {
+          return { ...state, providerOverride: value.slice(0, slash), modelOverride: value.slice(slash + 1) }
+        }
+        // A bare model id clears a previous provider override: the two travel
+        // together, and keeping a stale provider is how a session ends up
+        // asking the wrong vendor for a model id.
+        const { providerOverride: _stale, ...rest } = state
+        return { ...rest, modelOverride: value }
       }
       return state
     }
@@ -315,6 +372,8 @@ export function auditView(
     readonly maxReviewsPerTurn: number
     readonly breakerTrips: boolean
     readonly defaultReviewerModel: string
+    /** Deployment default provider half; `''` inherits the calling agent's. */
+    readonly defaultReviewerProvider: string
   },
 ): AuditView {
   return {
@@ -328,6 +387,7 @@ export function auditView(
     refused: state.refused,
     pendingOverrides: state.pendingOverrides,
     reviewerModel: state.modelOverride ?? defaults.defaultReviewerModel,
+    reviewerProvider: state.providerOverride ?? defaults.defaultReviewerProvider,
   }
 }
 
@@ -480,11 +540,11 @@ export type WiredProjectionDefinition<K extends AuditProjectionKey> =
  * @param defaults - deployment values the log does not carry.
  * @returns the projection definition to register.
  */
-export function createAuditProjection(defaults: {
-  readonly enabledByDefault: boolean
+export function createAuditProjection(defaults: AuditFoldDefaults & {
   readonly maxReviewsPerTurn: number
   readonly breakerTrips: (state: AuditState) => boolean
   readonly defaultReviewerModel: string
+  readonly defaultReviewerProvider: string
 }): WiredProjectionDefinition<AuditProjectionKey> {
   const stateSchema = z.object({
     records: z.array(z.any()),
@@ -494,6 +554,7 @@ export function createAuditProjection(defaults: {
     step: z.number(),
     enabledOverride: z.boolean().optional(),
     modelOverride: z.string().optional(),
+    providerOverride: z.string().optional(),
     reviewsThisTurn: z.number(),
     denialsStreak: z.number(),
     window: z.array(z.boolean()),
@@ -515,6 +576,7 @@ export function createAuditProjection(defaults: {
         maxReviewsPerTurn: defaults.maxReviewsPerTurn,
         breakerTrips: defaults.breakerTrips(state),
         defaultReviewerModel: defaults.defaultReviewerModel,
+        defaultReviewerProvider: defaults.defaultReviewerProvider,
       }),
     },
   }
