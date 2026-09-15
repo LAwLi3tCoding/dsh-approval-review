@@ -13,14 +13,17 @@
 | | |
 |---|---|
 | **走官方缝** | 注册在 `approval/request` 上的应答者，用 `prepend: true` 排在人类 UI 应答者之前，只认领自己策略范围内的请求，其余全部交还。 |
-| **第二个模型复核** | 一次性的复核调用——不挂工具、不碰工作区、不是 Agent——只读一份有界、已脱敏的证据包，返回 `{decision, risk, reason, suggestion}`。 |
+| **第二个模型复核** | 复核者跑成**只读子代理**（`fork`），工具白名单只有 `read`/`glob`/`grep`，所以它能真去**读工作区**——"这个路径到底在不在仓库里"从猜测变成事实。`mode: direct` 可退回纯模型调用。 |
 | **失败即拒绝** | 复核崩溃、超时、输出被截断或不符合 schema 时走配置的失败策略，默认 `rejected`。证据不足永远不会变成放行。 |
 | **理由回到模型** | 否决理由会追加到被拒的工具结果里，并明确要求模型不得绕道重试同一目标。 |
 | **风险闸门** | 裁决为 `allow` 但风险高于 `maxAutoAllowRisk` 时不会自动放行，而是转人工。 |
 | **熔断** | 连续否决与滑动窗口否决双阈值，对齐 Codex 的同回合熔断；触发后本回合后续请求转人工。 |
 | **预算** | 每回合复核调用上限，避免死循环把复核费用刷爆。 |
 | **一次性放行** | `/approval-review approve [n]` 为人工作一次重试授权。复核者仍独立裁决，只是会看到这条人工授权。 |
-| **审计卡页** | 会话头部的卡页，逐条展示工具、裁决、风险等级、理由、更安全的替代建议、复核路由、耗时，以及实时的预算与熔断状态。 |
+| **composer 第二轴** | composer 工具行里一个 `自动审批 · 人工 / AI` 芯片，紧挨访问模式芯片。和 Codex 一样，"谁来裁决"是**独立于**"能动多少"的另一根轴，不是第四个沙箱预设。 |
+| **裁决缓存** | 相同的 `tool + arguments` 复用近期裁决，重试循环不会每次都烧一次复核调用。仅在 `context.turns` 为 0 时启用——那时裁决才真正可从动作本身重放。 |
+| **失败预算** | 每回合复核**失败**次数上限，避免复核持续崩溃时无限重试、把请求卡住。 |
+| **审计卡页** | 会话头部的卡页，逐条展示工具、裁决、风险等级、理由、更安全的替代建议、复核路由、耗时，以及实时的预算与熔断状态，并带真正可用的开/关与一次性放行按钮。 |
 
 ## 安装
 
@@ -54,7 +57,10 @@ dsh --profile <profile> --dump-config | grep -A6 'id: approval-review'
 | `reviewTools` | `[bash, pwsh, write]` | 送往复核者的工具名 glob。 |
 | `defaultPolicy` | `human` | 未命中 glob 的工具走哪种策略：`ai` / `human` / `never`。 |
 | `rules` | `[]` | 有序的 `{pattern, policy, field?, note?}` 正则规则，优先于工具表求值。`field` 可为 `reason`（默认）、`toolName`、`arguments`。 |
+| `reviewer.mode` | `subagent` | `subagent` 跑只读子代理（能读工作区）；`direct` 走一次性纯模型调用。 |
 | `reviewer.provider` / `.model` | *(继承)* | 复核路由；不填则继承调用 Agent 自己的路由。 |
+| `reviewer.subagentProvider` | `fork` | `mode: subagent` 用的子代理后端（`fork` / `spawn`）。 |
+| `reviewer.tools` | `[read, glob, grep]` | 复核子代理的工具白名单。留空会回退到只读默认，而不是继承父代理的全部工具。 |
 | `reviewer.timeoutMs` | `60000` | 单次复核的硬超时。 |
 | `reviewer.maxTokens` | `1024` | 输出上限。 |
 | `reviewer.temperature` | `0` | 采样温度。 |
@@ -72,6 +78,9 @@ dsh --profile <profile> --dump-config | grep -A6 'id: approval-review'
 | `onReviewerFailure` | `rejected` | 复核崩溃、超时或输出不合 schema 时。 |
 | `budget.maxReviewsPerTurn` | `20` | 每回合复核调用上限。 |
 | `budget.onExhausted` | `delegate` | 预算耗尽后：`delegate` / `deny`。 |
+| `maxFailuresPerTurn` | `10` | 每回合复核**失败**次数上限，超过即转人工。 |
+| `verdictCache.ttlMs` | `60000` | 相同动作复用裁决；`0` 关闭。仅在 `context.turns` 为 0 时生效。 |
+| `verdictCache.maxEntries` | `256` | 缓存指纹条数上限，超出自淘汰最旧。 |
 | `circuitBreaker.consecutiveDenials` | `3` | 连续否决多少次触发熔断。 |
 | `circuitBreaker.windowDenials` | `10` | 滑动窗口内否决多少次触发；`0` 关闭该规则。 |
 | `circuitBreaker.windowSize` | `50` | 滑动窗口大小。 |

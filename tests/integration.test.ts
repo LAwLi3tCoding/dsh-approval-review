@@ -85,7 +85,12 @@ async function mounted(overrides: Record<string, unknown> = {}): Promise<{
   const reviewer = new ScriptedReviewer()
   const llm = new LlmRuntime(ctx)
   llm.registerAdapter(['test'], reviewer)
-  const config = (Config as unknown as (value: unknown) => ConfigShape)(overrides)
+  // These cases exercise the DIRECT reviewer: the subagent path needs a
+  // `subagents` provider mounted, and is covered separately below.
+  const config = (Config as unknown as (value: unknown) => ConfigShape)({
+    ...overrides,
+    reviewer: { mode: 'direct', ...(overrides['reviewer'] as Record<string, unknown> | undefined) },
+  })
   apply(ctx, config)
   return { ctx, reviewer, config }
 }
@@ -368,7 +373,7 @@ describe('approval audit trail', () => {
     await ctx.plugin(CommandRuntime)
     const reviewer = new ScriptedReviewer()
     new LlmRuntime(ctx).registerAdapter(['test'], reviewer)
-    apply(ctx, (Config as unknown as (value: unknown) => ConfigShape)({}))
+    apply(ctx, (Config as unknown as (value: unknown) => ConfigShape)({ reviewer: { mode: 'direct' } }))
     const { agent } = fakeAgent()
     // No agent route and no configured reviewer route.
     ;(agent as unknown as { options: Record<string, unknown> }).options = {}
@@ -438,5 +443,73 @@ describe('refusal rationale delivery', () => {
 
     const decision = await postExecute(ctx, 'c', 'accept')
     expect(decision.kind).toBe('accept')
+  })
+})
+
+describe('verdict cache integration', () => {
+  it('reuses a verdict for an identical action only when no transcript is sent', async () => {
+    const { ctx, reviewer } = await mounted({ context: { turns: 0 }, verdictCache: { ttlMs: 60000 } })
+    const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c1', 'bash', '{"command":"same"}'))
+    seed(agent, 'tool/call', { turn: 1, step: 0, callId: ToolCallId('c2'), name: 'bash', arguments: '{"command":"same"}' })
+
+    expect(await ctx.approval.request(requestOf(agent, 'bash', 'c1'))).toBe('allowed-once')
+    expect(await ctx.approval.request(requestOf(agent, 'bash', 'c2'))).toBe('allowed-once')
+
+    // Second request is served from the cache: no second reviewer call.
+    expect(reviewer.calls).toHaveLength(1)
+  })
+
+  it('does not reuse a verdict while a transcript is part of the evidence', async () => {
+    // Default context.turns is 2, so a verdict depends on the conversation and
+    // is not replayable from the action alone.
+    const { ctx, reviewer } = await mounted()
+    const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c1', 'bash', '{"command":"same"}'))
+    seed(agent, 'tool/call', { turn: 1, step: 0, callId: ToolCallId('c2'), name: 'bash', arguments: '{"command":"same"}' })
+
+    await ctx.approval.request(requestOf(agent, 'bash', 'c1'))
+    await ctx.approval.request(requestOf(agent, 'bash', 'c2'))
+
+    expect(reviewer.calls).toHaveLength(2)
+  })
+
+  it('separates different argument bytes', async () => {
+    const { ctx, reviewer } = await mounted({ context: { turns: 0 } })
+    const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c1', 'bash', '{"command":"a"}'))
+    seed(agent, 'tool/call', { turn: 1, step: 0, callId: ToolCallId('c2'), name: 'bash', arguments: '{"command":"b"}' })
+
+    await ctx.approval.request(requestOf(agent, 'bash', 'c1'))
+    await ctx.approval.request(requestOf(agent, 'bash', 'c2'))
+
+    expect(reviewer.calls).toHaveLength(2)
+  })
+})
+
+describe('reviewer failure budget', () => {
+  it('stops retrying a repeatedly failing reviewer and delegates', async () => {
+    const { ctx, reviewer } = await mounted({ maxFailuresPerTurn: 1, onReviewerFailure: 'delegate' })
+    reviewer.failure = new Error('adapter exploded')
+    const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c1', 'bash', '{"command":"a"}'))
+    seed(agent, 'tool/call', { turn: 1, step: 0, callId: ToolCallId('c2'), name: 'bash', arguments: '{"command":"b"}' })
+
+    // First request burns the failure budget and delegates.
+    expect(await ctx.approval.request(requestOf(agent, 'bash', 'c1'))).toBe('unavailable')
+    // Second request is not even attempted: it goes straight to the chain.
+    expect(await ctx.approval.request(requestOf(agent, 'bash', 'c2'))).toBe('unavailable')
+    expect(reviewer.calls).toHaveLength(1)
+  })
+
+  it('fails closed on a missing subagent provider under the default policy', async () => {
+    // Default mode is `subagent`; this harness mounts no subagents service, so
+    // the reviewer cannot run and the default `rejected` policy must apply.
+    const ctx = new Context()
+    await ctx.plugin(ApprovalService)
+    await ctx.plugin(CommandRuntime)
+    const reviewer = new ScriptedReviewer()
+    new LlmRuntime(ctx).registerAdapter(['test'], reviewer)
+    apply(ctx, (Config as unknown as (value: unknown) => ConfigShape)({}))
+    const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
+
+    expect(await ctx.approval.request(requestOf(agent, 'bash', 'c'))).toBe('rejected')
+    expect(reviewer.calls).toHaveLength(0)
   })
 })

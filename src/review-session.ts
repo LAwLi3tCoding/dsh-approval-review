@@ -44,6 +44,8 @@ export interface SessionState {
 export interface GuardLimits {
   /** Maximum reviewer calls per open turn. */
   readonly maxReviewsPerTurn: number
+  /** Maximum reviewer failures per open turn. */
+  readonly maxFailuresPerTurn: number
   /** Consecutive refusals that trip the breaker. */
   readonly consecutiveDenials: number
   /** Refusals within the window that trip the breaker; 0 disables. */
@@ -182,6 +184,23 @@ export class ReviewSessions {
    */
   budgetAvailable(session: Session, limits: GuardLimits): boolean {
     return this.stateOf(session).reviewsThisTurn < limits.maxReviewsPerTurn
+  }
+
+  /**
+   * Whether the reviewer has not already failed too often this turn. A reviewer
+   * that keeps crashing must not be retried without bound: each attempt costs a
+   * model call and delays the human the request should have reached.
+   * @param session - the session to test.
+   * @param limits - resolved budget limits.
+   * @returns true when another attempt is allowed.
+   */
+  failureBudgetAvailable(session: Session, limits: GuardLimits): boolean {
+    return this.stateOf(session).failuresThisTurn < limits.maxFailuresPerTurn
+  }
+
+  /** Reviewer failures recorded in the open turn. */
+  failuresThisTurn(session: Session): number {
+    return this.stateOf(session).failuresThisTurn
   }
 
   /**

@@ -37,11 +37,23 @@ export interface RiskRuleConfig {
 }
 
 /** Reviewer model and prompt configuration. */
+/** How the reviewer is run. */
+export type ReviewerMode = 'subagent' | 'direct'
+
 export interface ReviewerConfig {
+  /** `subagent` runs a read-only child; `direct` makes one plain model call. */
+  readonly mode: ReviewerMode
   /** Provider route for the reviewer; unset inherits the calling agent's provider. */
   readonly provider?: string
   /** Model id for the reviewer; unset inherits the calling agent's model. */
   readonly model?: string
+  /** Subagent backend used by `mode: 'subagent'`. */
+  readonly subagentProvider: string
+  /**
+   * The reviewer child's tool allow-list. Mutable to match Schemastery's
+   * inferred `string[]`; the plugin never writes it.
+   */
+  readonly tools: string[]
   /** Hard deadline for one reviewer call. */
   readonly timeoutMs: number
   /** Output-token cap for one reviewer call. */
@@ -68,6 +80,14 @@ export interface ContextConfig {
   readonly includeAssistant: boolean
   /** Include tool call/result pairs in the transcript. */
   readonly includeToolActivity: boolean
+}
+
+/** Verdict cache settings. */
+export interface VerdictCacheConfig {
+  /** How long a cached verdict stays usable; 0 disables the cache. */
+  readonly ttlMs: number
+  /** Maximum cached fingerprints before oldest-eviction. */
+  readonly maxEntries: number
 }
 
 /** Per-turn reviewer budget. */
@@ -124,6 +144,10 @@ export interface Config {
   readonly onReviewerFailure: FallbackAction
   /** Per-turn reviewer budget. */
   readonly budget: BudgetConfig
+  /** Per-turn reviewer-FAILURE budget, so a broken reviewer cannot retry without bound. */
+  readonly maxFailuresPerTurn: number
+  /** Verdict cache settings. */
+  readonly verdictCache: VerdictCacheConfig
   /** Rejection circuit breaker. */
   readonly circuitBreaker: CircuitBreakerConfig
   /** One-shot `/approve` override. */
@@ -136,6 +160,7 @@ export interface Config {
   readonly language: 'en' | 'zh'
 }
 
+const REVIEWER_MODES: readonly ReviewerMode[] = ['subagent', 'direct']
 const TOOL_POLICIES: readonly ToolPolicy[] = ['ai', 'human', 'never']
 const RISK_GATE_ACTIONS: readonly RiskGateAction[] = ['allow', 'delegate', 'deny']
 const UNCERTAINTY_ACTIONS: readonly UncertaintyAction[] = ['delegate', 'allow', 'deny']
@@ -164,12 +189,24 @@ export const Config: Schema<Config> = Schema.object({
   })).default([]).description('Ordered regex rules evaluated before the tool table.'),
 
   reviewer: Schema.object({
+    // eslint-disable-next-line
+    mode: Schema.union(REVIEWER_MODES).default('subagent').description(
+      'How the reviewer runs: `subagent` forks a read-only child that can inspect the '
+      + 'workspace; `direct` makes one plain model call with the evidence packet only.',
+    ),
     provider: Schema.string().description('Reviewer provider route; unset inherits the calling agent.'),
     model: Schema.string().description('Reviewer model id; unset inherits the calling agent.'),
+    subagentProvider: Schema.string().default('fork').description(
+      'Subagent backend for `mode: subagent` (`fork` / `spawn`).',
+    ),
+    tools: Schema.array(Schema.string()).default(['read', 'glob', 'grep']).description(
+      'The reviewer child\'s tool allow-list. An empty list falls back to the read-only default '
+      + 'rather than the parent\'s whole face.',
+    ),
     timeoutMs: Schema.number().step(1).min(1000).default(60000)
       .description('Hard deadline for one reviewer call.'),
     maxTokens: Schema.number().step(1).min(64).default(1024)
-      .description('Output-token cap for one reviewer call.'),
+      .description('Output-token cap for one reviewer call (`mode: direct`).'),
     temperature: Schema.number().min(0).max(2).default(0)
       .description('Sampling temperature; 0 keeps the reviewer near-deterministic.'),
     policyText: Schema.string().description('Ruling policy appended to the reviewer prompt.'),
@@ -209,6 +246,20 @@ export const Config: Schema<Config> = Schema.object({
       .description('Maximum reviewer calls per open turn.'),
     onExhausted: Schema.union(BUDGET_ACTIONS).default('delegate')
       .description('Reaction once the per-turn review budget is spent.'),
+  // @ts-expect-error Schemastery cannot express "every field has its own default",
+  // so `{}` is the correct seed even though the type demands the filled shape.
+  }).default({}),
+
+  maxFailuresPerTurn: Schema.number().step(1).min(1).default(10)
+    .description('Maximum reviewer failures per open turn before requests delegate.'),
+
+  verdictCache: Schema.object({
+    ttlMs: Schema.number().step(1).min(0).default(60000)
+      .description('Reuse a recent verdict for an identical tool+arguments fingerprint; 0 disables. '
+        + 'Only consulted when `context.turns` is 0, because a transcript-dependent verdict is not '
+        + 'replayable from the action alone.'),
+    maxEntries: Schema.number().step(1).min(0).default(256)
+      .description('Maximum cached fingerprints before oldest-eviction.'),
   // @ts-expect-error Schemastery cannot express "every field has its own default",
   // so `{}` is the correct seed even though the type demands the filled shape.
   }).default({}),

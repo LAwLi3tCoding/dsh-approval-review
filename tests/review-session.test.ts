@@ -17,6 +17,7 @@ function session(): Session {
 function limits(overrides: Partial<GuardLimits> = {}): GuardLimits {
   return {
     maxReviewsPerTurn: 20,
+    maxFailuresPerTurn: 10,
     consecutiveDenials: 3,
     windowDenials: 10,
     windowSize: 50,
@@ -250,5 +251,42 @@ describe('ReviewSessions snapshot', () => {
     sessions.noteReview(first)
     expect(sessions.stateOf(first).reviewsThisTurn).toBe(1)
     expect(sessions.stateOf(second).reviewsThisTurn).toBe(0)
+  })
+})
+
+describe('ReviewSessions failure budget', () => {
+  it('allows attempts until the failure budget is spent', () => {
+    const sessions = new ReviewSessions()
+    const target = session()
+    enterTurn(sessions, target, 1)
+    const guard = limits({ maxFailuresPerTurn: 2 })
+    expect(sessions.failureBudgetAvailable(target, guard)).toBe(true)
+    sessions.noteFailure(target)
+    sessions.noteFailure(target)
+    expect(sessions.failureBudgetAvailable(target, guard)).toBe(false)
+    expect(sessions.failuresThisTurn(target)).toBe(2)
+  })
+
+  it('refills the failure budget on the next turn', () => {
+    const sessions = new ReviewSessions()
+    const target = session()
+    const guard = limits({ maxFailuresPerTurn: 1 })
+    enterTurn(sessions, target, 1)
+    sessions.noteFailure(target)
+    expect(sessions.failureBudgetAvailable(target, guard)).toBe(false)
+    enterTurn(sessions, target, 2)
+    expect(sessions.failureBudgetAvailable(target, guard)).toBe(true)
+    expect(sessions.failuresThisTurn(target)).toBe(0)
+  })
+
+  it('keeps the review and failure budgets independent', () => {
+    const sessions = new ReviewSessions()
+    const target = session()
+    const guard = limits({ maxReviewsPerTurn: 5, maxFailuresPerTurn: 1 })
+    enterTurn(sessions, target, 1)
+    sessions.noteReview(target)
+    sessions.noteFailure(target)
+    expect(sessions.budgetAvailable(target, guard)).toBe(true)
+    expect(sessions.failureBudgetAvailable(target, guard)).toBe(false)
   })
 })

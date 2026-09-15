@@ -40,10 +40,13 @@ import {
   renderTranscript,
   resolveReviewerRoute,
   runReviewerCall,
+  type ReviewerRoute,
   type TranscriptLine,
 } from './reviewer.ts'
 import type { ReviewVerdict } from './review-types.ts'
 import { ReviewSessions, type GuardLimits } from './review-session.ts'
+import { VerdictCache } from './verdict-cache.ts'
+import { runSubagentReviewer } from './subagent-reviewer.ts'
 
 /** A refusal this plugin resolved, awaiting delivery into the refused tool result. */
 export interface Refusal {
@@ -59,6 +62,7 @@ export interface Refusal {
 export function guardLimits(config: Config): GuardLimits {
   return {
     maxReviewsPerTurn: config.budget.maxReviewsPerTurn,
+    maxFailuresPerTurn: config.maxFailuresPerTurn,
     consecutiveDenials: config.circuitBreaker.consecutiveDenials,
     windowDenials: config.circuitBreaker.windowDenials,
     windowSize: config.circuitBreaker.windowSize,
@@ -77,11 +81,33 @@ export class ReviewRuntime {
   private readonly refusals = new Map<string, Refusal>()
   /** Latest folded audit state per session, for the live view defaults. */
   private readonly auditStates = new WeakMap<Session, AuditState>()
+  /** Reused verdicts for identical actions, when the evidence allows it. */
+  readonly cache: VerdictCache
+
+  /** Number of verdicts served from the cache since mount. */
+  private cacheHits = 0
 
   constructor(
     private readonly ctx: Context,
     public readonly config: Config,
-  ) {}
+  ) {
+    this.cache = new VerdictCache(config.verdictCache.ttlMs, config.verdictCache.maxEntries)
+  }
+
+  /** Whether the cache may be consulted: no transcript means the verdict is replayable. */
+  private get cacheUsable(): boolean {
+    return this.config.context.turns === 0 && this.cache.enabled
+  }
+
+  /** Reviewer failures recorded in the open turn, for the status report. */
+  failuresThisTurn(session: Session): number {
+    return this.sessions.failuresThisTurn(session)
+  }
+
+  /** Cache statistics for the status report. */
+  stats(): { readonly hits: number; readonly misses: number; readonly size: number; readonly usable: boolean } {
+    return { hits: this.cacheHits, misses: this.cache.missCount, size: this.cache.size, usable: this.cacheUsable }
+  }
 
   /** Effective guard limits for this mount. */
   get limits(): GuardLimits {
@@ -264,61 +290,140 @@ export class ReviewRuntime {
       return await this.delegate(req, 'no-route', next)
     }
 
-    const system = buildReviewerSystemPrompt(this.config.reviewer)
-    const message = buildReviewerUserMessage({
-      toolName: req.toolName,
-      // The reviewer is a second model and gets only redacted arguments; the
-      // audit ledger keeps the raw ones, which already sit in the user's log.
-      argumentsText: redactToolArguments(
-        rawArguments,
-        this.config.reviewer.argumentMaxChars,
-        this.config.reviewer.argumentsBudgetChars,
-      ),
-      transcript: this.buildTranscript(session),
-      ...req.reason === undefined ? {} : { askReason: req.reason },
-    })
+    // The reviewer is a second model and gets only redacted arguments; the audit
+    // ledger keeps the raw ones, which already sit in the user's log.
+    const argumentsText = redactToolArguments(
+      rawArguments,
+      this.config.reviewer.argumentMaxChars,
+      this.config.reviewer.argumentsBudgetChars,
+    )
+    const transcript = this.buildTranscript(session)
+
+    // Reuse a recent verdict for a byte-identical action. Only sound with no
+    // transcript in evidence, because otherwise the verdict also depends on the
+    // conversation and could not be replayed from the action alone.
+    const fingerprint = VerdictCache.fingerprint(req.toolName, rawArguments)
+    if (this.cacheUsable) {
+      const cached = this.cache.get(fingerprint)
+      if (cached !== undefined) {
+        this.cacheHits += 1
+        this.ctx.logger('dsh-approval-review').debug(
+          `reused a cached verdict for tool "${req.toolName}"`,
+        )
+        return await this.settle(req, session, policySource, route, cached, 0, override, next)
+      }
+    }
+
+    if (!this.sessions.failureBudgetAvailable(session, this.limits)) {
+      this.ctx.logger('dsh-approval-review').warn(
+        `reviewer failed too often this turn (${this.sessions.failuresThisTurn(session)}); leaving tool "${req.toolName}" to the composed answerers`,
+      )
+      return await this.delegate(req, 'reviewer-failure', next)
+    }
 
     this.sessions.noteReview(session)
-    const result = await runReviewerCall(this.ctx, route, system, message, {
-      maxTokens: this.config.reviewer.maxTokens,
-      temperature: this.config.reviewer.temperature,
-      timeoutMs: this.config.reviewer.timeoutMs,
-      ...req.signal === undefined ? {} : { signal: req.signal },
-      sessionId: session.id,
-    })
+    const result = this.config.reviewer.mode === 'subagent'
+      ? await runSubagentReviewer(this.ctx, {
+        ...this.config.reviewer.provider === undefined ? {} : { provider: this.config.reviewer.provider },
+        ...this.config.reviewer.model === undefined ? {} : { model: this.config.reviewer.model },
+        reviewerProvider: this.config.reviewer.subagentProvider,
+        reviewerTools: this.config.reviewer.tools,
+        timeoutMs: this.config.reviewer.timeoutMs,
+        parent: req.agent,
+        evidence: {
+          toolName: req.toolName,
+          argumentsText,
+          transcript,
+          ...req.reason === undefined ? {} : { askReason: req.reason },
+        },
+        ...this.config.reviewer.policyText === undefined ? {} : { policyText: this.config.reviewer.policyText },
+        ...this.config.reviewer.guidance === undefined ? {} : { guidance: this.config.reviewer.guidance },
+        ...req.signal === undefined ? {} : { signal: req.signal },
+      })
+      : await runReviewerCall(
+        this.ctx,
+        route,
+        buildReviewerSystemPrompt(this.config.reviewer),
+        buildReviewerUserMessage({
+          toolName: req.toolName,
+          argumentsText,
+          transcript,
+          ...req.reason === undefined ? {} : { askReason: req.reason },
+        }),
+        {
+          maxTokens: this.config.reviewer.maxTokens,
+          temperature: this.config.reviewer.temperature,
+          timeoutMs: this.config.reviewer.timeoutMs,
+          ...req.signal === undefined ? {} : { signal: req.signal },
+          sessionId: session.id,
+        },
+      )
     if (result.verdict === undefined) this.sessions.noteFailure(session)
+    else if (this.cacheUsable) this.cache.put(fingerprint, result.verdict)
 
-    const gate = applyVerdictGates(this.config, result.verdict)
+    return await this.settle(req, session, policySource, route, result.verdict, result.durationMs, override, next, result.failure)
+  }
+
+  /**
+   * Turn one reviewer verdict (or its absence) into an approval outcome: apply
+   * the risk/uncertainty gates, fold the breaker, stash the refusal marker.
+   * @param req - the approval request.
+   * @param session - the requesting session.
+   * @param policySource - which rule routed this request, for the log line.
+   * @param route - the route the reviewer ran on.
+   * @param verdict - the verdict, or undefined when the reviewer never answered.
+   * @param durationMs - reviewer duration for the audit marker.
+   * @param override - the consumed one-shot authorization, when one applied.
+   * @param next - the rest of the answerer chain.
+   * @param failure - the reviewer's failure description, when it never answered.
+   * @returns the closed approval outcome.
+   */
+  private async settle(
+    req: ApprovalRequestEvent,
+    session: Session,
+    policySource: string,
+    route: ReviewerRoute,
+    verdict: ReviewVerdict | undefined,
+    durationMs: number,
+    override: { toolName: string; reviewId?: string } | undefined,
+    next: () => Promise<ApprovalOutcome>,
+    failure?: string,
+  ): Promise<ApprovalOutcome> {
+    const callId = req.callId
+    /* v8 ignore next -- callers reject callId-less requests before reaching here */
+    if (callId === undefined) return await next()
+
+    const gate = applyVerdictGates(this.config, verdict)
     if (gate.action === 'delegate') {
       this.ctx.logger('dsh-approval-review').info(
-        `delegating tool "${req.toolName}" to the human chain: ${gate.note}${result.failure === undefined ? '' : ` (${result.failure})`}`,
+        `delegating tool "${req.toolName}" to the human chain: ${gate.note}${failure === undefined ? '' : ` (${failure})`}`,
       )
-      return await this.delegate(req, result.verdict === undefined ? 'reviewer-failure' : 'uncertain', next)
+      return await this.delegate(req, verdict === undefined ? 'reviewer-failure' : 'uncertain', next)
     }
 
     if (gate.action === 'allow') {
       this.recordDecision(session, false)
       this.ctx.logger('dsh-approval-review').info(
-        `allowed ${req.toolName} (${policySource}): ${result.verdict?.reason ?? gate.note}`,
+        `allowed ${req.toolName} (${policySource}): ${verdict?.reason ?? gate.note}`,
       )
       return 'allowed-once'
     }
 
     this.putRefusal(callId, {
       marker: formatReviewMarker({
-        reason: result.verdict?.reason ?? gate.note,
-        ...result.verdict?.suggestion === undefined ? {} : { suggestion: result.verdict.suggestion },
-        ...result.verdict?.risk === undefined ? {} : { risk: result.verdict.risk },
+        reason: verdict?.reason ?? gate.note,
+        ...verdict?.suggestion === undefined ? {} : { suggestion: verdict.suggestion },
+        ...verdict?.risk === undefined ? {} : { risk: verdict.risk },
         reviewerRoute: `${route.provider}/${route.model}`,
-        durationMs: result.durationMs,
-        uncertain: result.verdict?.uncertain === true,
+        durationMs,
+        uncertain: verdict?.uncertain === true,
       }),
-      ...result.verdict === undefined ? {} : { verdict: result.verdict },
+      ...verdict === undefined ? {} : { verdict },
       hardStop: true,
     })
     this.recordDecision(session, true)
     this.ctx.logger('dsh-approval-review').info(
-      `refused ${req.toolName} (${policySource}): ${result.verdict?.reason ?? gate.note}`,
+      `refused ${req.toolName} (${policySource}): ${verdict?.reason ?? gate.note}`,
     )
     if (override !== undefined) {
       this.ctx.logger('dsh-approval-review').info(

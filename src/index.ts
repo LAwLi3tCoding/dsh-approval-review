@@ -123,13 +123,24 @@ export function apply(ctx: Context, config: ConfigShape): void {
         case 'status': {
           const view = runtime.liveView(session)
           const last = view.records.find(record => record.reason !== undefined) ?? view.records[0]
+          const cache = runtime.stats()
           const lines = [
             zh
-              ? `自动审批：${view.enabled ? '开启' : '关闭'}｜本回合复审 ${view.reviewsThisTurn}/${view.maxReviewsPerTurn}｜连续否决 ${view.consecutiveDenials}`
-              : `Automatic approval review: ${view.enabled ? 'on' : 'off'} | reviews this turn ${view.reviewsThisTurn}/${view.maxReviewsPerTurn} | consecutive denials ${view.consecutiveDenials}`,
+              ? `自动审批：${view.enabled ? '开启' : '关闭'}｜复核模式 ${config.reviewer.mode}${config.reviewer.mode === 'subagent' ? ` (${config.reviewer.subagentProvider})` : ''}｜模型 ${config.reviewer.model ?? '继承会话'}`
+              : `Automatic approval review: ${view.enabled ? 'on' : 'off'} | reviewer ${config.reviewer.mode}${config.reviewer.mode === 'subagent' ? ` (${config.reviewer.subagentProvider})` : ''} | model ${config.reviewer.model ?? 'inherit session'}`,
             zh
-              ? `累计审批 ${view.total} 次，其中否决 ${view.refused} 次｜熔断${view.circuitOpen ? '已触发' : '未触发'}｜可用一次性放行 ${view.pendingOverrides}`
+              ? `本回合：复审 ${view.reviewsThisTurn}/${view.maxReviewsPerTurn}｜复核失败 ${runtime.failuresThisTurn(session)}/${config.maxFailuresPerTurn}｜连续否决 ${view.consecutiveDenials}`
+              : `This turn: reviews ${view.reviewsThisTurn}/${view.maxReviewsPerTurn} | reviewer failures ${runtime.failuresThisTurn(session)}/${config.maxFailuresPerTurn} | consecutive denials ${view.consecutiveDenials}`,
+            zh
+              ? `累计审批 ${view.total} 次，否决 ${view.refused} 次｜熔断${view.circuitOpen ? '已触发' : '未触发'}｜可用一次性放行 ${view.pendingOverrides}`
               : `Approvals ${view.total}, refusals ${view.refused} | breaker ${view.circuitOpen ? 'open' : 'closed'} | pending overrides ${view.pendingOverrides}`,
+            cache.usable
+              ? (zh
+                ? `裁决缓存：命中 ${cache.hits}｜未命中 ${cache.misses}｜在存 ${cache.size}`
+                : `Verdict cache: hits ${cache.hits} | misses ${cache.misses} | live ${cache.size}`)
+              : (zh
+                ? `裁决缓存：未启用（context.turns=${config.context.turns}；只有 0 时才可安全复用裁决）`
+                : `Verdict cache: disabled (context.turns=${config.context.turns}; only 0 makes a verdict replayable)`),
             last === undefined
               ? (zh ? '最近一次审批：无记录' : 'Most recent approval: none recorded')
               : (zh

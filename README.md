@@ -25,14 +25,17 @@ circuit breaker stops the agent from looping on escalation attempts.
 | | |
 |---|---|
 | **Official seam** | An `approval/request` answerer registered with `prepend: true`, so it claims a request ahead of the human UI answerer, and delegates everything else back to the chain. |
-| **Second-model review** | A one-shot reviewer call — no tools, no workspace access, no agent — that reads a bounded, secret-redacted evidence packet and answers with `{decision, risk, reason, suggestion}`. |
+| **Second-model review** | A one-shot reviewer runs as a **read-only subagent** (`fork`) holding only `read`/`glob`/`grep`, so it can go READ the workspace — "is this path actually inside the repo?" becomes a fact, not a guess. `mode: direct` falls back to a plain model call over the evidence packet. |
 | **Fail closed** | A crashed, timed-out, truncated, or off-schema reviewer answer yields the configured failure policy, which defaults to `rejected`. Insufficient evidence never becomes an approval. |
 | **Rationale reaches the model** | A denial's reason is appended to the refused tool result, with an explicit instruction not to pursue the same outcome through a workaround. |
 | **Risk gate** | An `allow` verdict above `maxAutoAllowRisk` does not auto-allow; it delegates to the human. |
 | **Circuit breaker** | Consecutive and rolling-window denial thresholds, matching Codex's per-turn breaker, after which further requests go to the human chain. |
 | **Budgets** | A per-turn cap on reviewer calls, so a loop cannot bill unlimited reviews. |
 | **One-shot override** | `/approval-review approve [n]` records a human authorization for one retry. The reviewer still decides; it just learns the human authorized it. |
-| **Audit card** | A session-header card rendering every request with its verdict, risk, rationale, safer-alternative suggestion, reviewer route, timing, and the live budget/breaker state. |
+| **Composer axis** | A `自动审批 · 人工 / AI` chip in the composer tool row, beside the access-mode chip. Like Codex, "who decides" is a separate axis from "how much can be touched", not a fourth sandbox preset. |
+| **Verdict cache** | Reuses a recent verdict for a byte-identical `tool + arguments`, so a retry loop does not bill a reviewer call each time. Only consulted when `context.turns` is 0, where the verdict really is replayable from the action alone. |
+| **Failure budget** | A per-turn cap on reviewer *failures*, so a broken reviewer cannot be retried without bound while the request waits. |
+| **Audit card** | A session-header card rendering every request with its verdict, risk, rationale, safer-alternative suggestion, reviewer route, timing, and the live budget/breaker state, plus working on/off and one-shot-approve buttons. |
 
 ## Install
 
@@ -71,7 +74,10 @@ schema defaults.
 | `reviewTools` | `[bash, pwsh, write]` | Tool-name globs routed to the reviewer. |
 | `defaultPolicy` | `human` | Policy for tools matching no glob: `ai` / `human` / `never`. |
 | `rules` | `[]` | Ordered `{pattern, policy, field?, note?}` regex rules, evaluated before the tool table. `field` is `reason` (default), `toolName`, or `arguments`. |
+| `reviewer.mode` | `subagent` | `subagent` forks a read-only child that can inspect the workspace; `direct` makes one plain model call. |
 | `reviewer.provider` / `.model` | *(inherit)* | Reviewer route; unset inherits the calling agent's own route. |
+| `reviewer.subagentProvider` | `fork` | Subagent backend for `mode: subagent` (`fork` / `spawn`). |
+| `reviewer.tools` | `[read, glob, grep]` | The reviewer child's tool allow-list. An empty list falls back to the read-only default rather than the parent's whole face. |
 | `reviewer.timeoutMs` | `60000` | Hard deadline for one reviewer call. |
 | `reviewer.maxTokens` | `1024` | Output cap. |
 | `reviewer.temperature` | `0` | Sampling temperature. |
@@ -89,6 +95,9 @@ schema defaults.
 | `onReviewerFailure` | `rejected` | Reviewer crashed, timed out, or answered off-schema. |
 | `budget.maxReviewsPerTurn` | `20` | Reviewer calls per open turn. |
 | `budget.onExhausted` | `delegate` | `delegate` / `deny` once spent. |
+| `maxFailuresPerTurn` | `10` | Reviewer *failures* per open turn before requests delegate. |
+| `verdictCache.ttlMs` | `60000` | Reuse a verdict for an identical action; `0` disables. Only consulted when `context.turns` is 0. |
+| `verdictCache.maxEntries` | `256` | Cached fingerprints before oldest-eviction. |
 | `circuitBreaker.consecutiveDenials` | `3` | Consecutive denials that trip the breaker. |
 | `circuitBreaker.windowDenials` | `10` | Denials within `windowSize` that trip it; `0` disables. |
 | `circuitBreaker.windowSize` | `50` | Rolling window size. |

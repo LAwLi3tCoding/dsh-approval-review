@@ -155,6 +155,35 @@ function RecordCard({ record, zh, onApprove }: {
   )
 }
 
+/**
+ * One switch button in the card header. Disabled while already in that state, so
+ * the control cannot issue a no-op command — a repeated no-op is what made the
+ * reference panel's status look stuck.
+ */
+function SwitchButton({ label, active, disabled, onClick }: {
+  label: string
+  active: boolean
+  disabled: boolean
+  onClick: () => void
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={disabled ? undefined : onClick}
+      style={{
+        fontSize: 11,
+        padding: '2px 8px',
+        borderRadius: 6,
+        cursor: disabled ? 'default' : 'pointer',
+        border: `1px solid ${active ? ALLOWED : BORDER}`,
+        color: disabled ? MUTED : TEXT,
+        background: 'transparent',
+      }}
+    >{label}</button>
+  )
+}
+
 /** The session-header button plus its popover ledger. */
 export function ReviewCard({ view, runCommand, zh }: ReviewCardProps): React.JSX.Element {
   const [open, setOpen] = useState(false)
@@ -209,13 +238,29 @@ export function ReviewCard({ view, runCommand, zh }: ReviewCardProps): React.JSX
 
       {!open ? null : (
         <div style={panelStyle}>
-          <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
             <strong style={{ fontSize: 13, color: TEXT }}>{zh ? '自动审批审计' : 'Automatic approval audit'}</strong>
             <span style={{ fontSize: 11, color: view?.enabled === false ? MUTED : ALLOWED }}>
               {view === undefined
                 ? (zh ? '尚无数据' : 'no data yet')
                 : view.enabled ? (zh ? '已开启' : 'on') : (zh ? '已关闭' : 'off')}
             </span>
+            {runCommand === undefined ? null : (
+              <span style={{ display: 'inline-flex', gap: 6 }}>
+                <SwitchButton
+                  label={zh ? '开启' : 'on'}
+                  active={view?.enabled === true}
+                  disabled={view?.enabled === true}
+                  onClick={() => runCommand('/approval-review on')}
+                />
+                <SwitchButton
+                  label={zh ? '关闭' : 'off'}
+                  active={view?.enabled === false}
+                  disabled={view?.enabled === false}
+                  onClick={() => runCommand('/approval-review off')}
+                />
+              </span>
+            )}
             {view === undefined ? null : (
               <span style={{ fontSize: 11, color: MUTED }}>
                 {zh

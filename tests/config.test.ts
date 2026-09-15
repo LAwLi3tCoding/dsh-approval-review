@@ -226,3 +226,31 @@ describe('Config schema', () => {
     expect(() => config({ reviewer: { timeoutMs: 0 } })).toThrow()
   })
 })
+
+describe('reviewer mode and new budgets', () => {
+  it('defaults to the subagent reviewer with a read-only tool face', () => {
+    const resolved = config()
+    expect(resolved.reviewer.mode).toBe('subagent')
+    expect(resolved.reviewer.subagentProvider).toBe('fork')
+    expect(resolved.reviewer.tools).toEqual(['read', 'glob', 'grep'])
+  })
+
+  it('accepts the direct reviewer mode', () => {
+    expect(config({ reviewer: { mode: 'direct' } }).reviewer.mode).toBe('direct')
+  })
+
+  it('rejects an unknown reviewer mode', () => {
+    expect(() => config({ reviewer: { mode: 'sideways' } })).toThrow()
+  })
+
+  it('defaults the failure budget and verdict cache', () => {
+    const resolved = config()
+    expect(resolved.maxFailuresPerTurn).toBe(10)
+    expect(resolved.verdictCache.ttlMs).toBe(60000)
+    expect(resolved.verdictCache.maxEntries).toBe(256)
+  })
+
+  it('allows disabling the verdict cache', () => {
+    expect(config({ verdictCache: { ttlMs: 0 } }).verdictCache.ttlMs).toBe(0)
+  })
+})
