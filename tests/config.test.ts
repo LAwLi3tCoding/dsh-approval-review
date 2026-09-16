@@ -127,10 +127,18 @@ describe('resolveToolPolicy', () => {
 })
 
 describe('applyVerdictGates', () => {
-  it('denies when the reviewer failed and the policy is the fail-closed default', () => {
-    const gate = applyVerdictGates(config(), undefined)
+  it('denies when the reviewer failed and the policy is fail-closed', () => {
+    const gate = applyVerdictGates(config({ onReviewerFailure: 'rejected' }), undefined)
     expect(gate.action).toBe('deny')
     expect(gate.note).toContain('fail-closed')
+  })
+
+  it('delegates when the reviewer never answered, under the shipping default', () => {
+    expect(applyVerdictGates(config({}), undefined).action).toBe('delegate')
+  })
+
+  it('refuses when the deployment asks for the fail-closed stance', () => {
+    expect(applyVerdictGates(config({ onReviewerFailure: 'rejected' }), undefined).action).toBe('deny')
   })
 
   it('delegates when the reviewer failed and onReviewerFailure is delegate', () => {
@@ -205,7 +213,7 @@ describe('Config schema', () => {
     expect(resolved.maxAutoAllowRisk).toBe('medium')
     expect(resolved.onRiskExceeded).toBe('delegate')
     expect(resolved.onUncertain).toBe('delegate')
-    expect(resolved.onReviewerFailure).toBe('rejected')
+    expect(resolved.onReviewerFailure).toBe('delegate')
     expect(resolved.budget.maxReviewsPerTurn).toBe(20)
     expect(resolved.budget.onExhausted).toBe('delegate')
     expect(resolved.circuitBreaker.consecutiveDenials).toBe(3)

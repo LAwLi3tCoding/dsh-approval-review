@@ -235,20 +235,30 @@ describe('approval answerer verdicts', () => {
     expect(await ctx.approval.request(requestOf(agent, 'bash', 'c'))).toBe('unavailable')
   })
 
-  it('denies a malformed reviewer answer under the fail-closed default', async () => {
-    const { ctx, reviewer } = await mounted()
+  it('denies a malformed reviewer answer when the deployment refuses on failure', async () => {
+    const { ctx, reviewer } = await mounted({ onReviewerFailure: 'rejected' })
     reviewer.answer = 'I think it is probably fine'
     const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
 
     expect(await ctx.approval.request(requestOf(agent, 'bash', 'c'))).toBe('rejected')
   })
 
-  it('denies when the reviewer call throws under the fail-closed default', async () => {
-    const { ctx, reviewer } = await mounted()
+  it('denies when the reviewer call throws and the deployment refuses on failure', async () => {
+    const { ctx, reviewer } = await mounted({ onReviewerFailure: 'rejected' })
     reviewer.failure = new Error('adapter exploded')
     const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
 
     expect(await ctx.approval.request(requestOf(agent, 'bash', 'c'))).toBe('rejected')
+  })
+
+  it('DELEGATES by default when the reviewer never answers', async () => {
+    // Shipping stance: a reviewer that could not run is an infrastructure
+    // problem, so the request goes to the human chain instead of being refused
+    // in the model's name.
+    const { ctx, reviewer } = await mounted()
+    reviewer.failure = new Error('adapter exploded')
+    const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
+    expect(await ctx.approval.request(requestOf(agent, 'bash', 'c'))).toBe('unavailable')
   })
 
   it('delegates when the reviewer fails and onReviewerFailure is delegate', async () => {
@@ -481,7 +491,9 @@ describe('refusal rationale delivery', () => {
     // A failed reviewer used to refuse with a policy label only, so an unusable
     // reviewer route (a rejected credential, an unknown model) looked exactly
     // like a decisive denial. The failure text now rides the rationale.
-    const { ctx, reviewer } = await mounted()
+    // Pins the refusal path the marker belongs to; the shipping default now
+    // delegates instead.
+    const { ctx, reviewer } = await mounted({ onReviewerFailure: 'rejected' })
     reviewer.failure = new Error('401 invalid api key for provider openai-codex')
     const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
     await ctx.approval.request(requestOf(agent, 'bash', 'c'))
@@ -603,15 +615,14 @@ describe('reviewer recursion guard', () => {
     const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
     runtime.registerReviewerSession('session-1')()
     expect(runtime.isReviewerSession({ header: { id: 'session-1' } } as never)).toBe(false)
-    // With the guard released the plugin tries to review, and this bare runtime
-    // has no reviewer route — so the fail-closed default answers, not `next()`.
-    let delegated = false
-    const outcome = await runtime.answer(requestOf(agent, 'bash', 'c'), async () => {
-      delegated = true
-      return 'unavailable'
-    })
-    expect(delegated).toBe(false)
-    expect(outcome).toBe('rejected')
+    // With the guard released the plugin ENGAGES the reviewer path instead of
+    // passing the request straight through. The discriminator is the runtime's
+    // own failure counter: this bare runtime mounts no subagents service, so the
+    // review fails, is counted, and the shipping `onReviewerFailure: delegate`
+    // then hands the request on.
+    const outcome = await runtime.answer(requestOf(agent, 'bash', 'c'), async () => 'unavailable')
+    expect(runtime.failuresThisTurn(agent.session)).toBe(1)
+    expect(outcome).toBe('unavailable')
   })
 })
 
@@ -757,15 +768,16 @@ describe('reviewer failure budget', () => {
     expect(reviewer.calls).toHaveLength(1)
   })
 
-  it('fails closed on a missing subagent provider under the default policy', async () => {
+  it('fails closed on a missing subagent provider when configured to refuse', async () => {
     // Default mode is `subagent`; this harness mounts no subagents service, so
-    // the reviewer cannot run and the default `rejected` policy must apply.
+    // the reviewer cannot run — and with `onReviewerFailure: rejected` the
+    // deployment refuses rather than asking.
     const ctx = new Context()
     await ctx.plugin(ApprovalService)
     await ctx.plugin(CommandRuntime)
     const reviewer = new ScriptedReviewer()
     new LlmRuntime(ctx).registerAdapter(['test'], reviewer)
-    apply(ctx, (Config as unknown as (value: unknown) => ConfigShape)({}))
+    apply(ctx, (Config as unknown as (value: unknown) => ConfigShape)({ onReviewerFailure: 'rejected' }))
     const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
 
     expect(await ctx.approval.request(requestOf(agent, 'bash', 'c'))).toBe('rejected')

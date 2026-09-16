@@ -82,7 +82,7 @@ dsh --profile <profile> --dump-config | grep -A6 'id: approval-review'
 | `maxAutoAllowRisk` | `medium` | 允许复核者自动放行的最高风险。 |
 | `onRiskExceeded` | `delegate` | 超过该上限时：`allow` / `delegate` / `deny`。 |
 | `onUncertain` | `delegate` | 复核者表示无法判断时。 |
-| `onReviewerFailure` | `rejected` | 复核崩溃、超时或输出不合 schema 时。 |
+| `onReviewerFailure` | `delegate` | 复核崩溃、超时或输出不合 schema 时。默认**转人工**：复核者跑不起来是基础设施问题，不是裁决；会拒的部署请显式设成 `rejected`。 |
 | `budget.maxReviewsPerTurn` | `20` | 每回合复核调用上限。 |
 | `budget.onExhausted` | `delegate` | 预算耗尽后：`delegate` / `deny`。 |
 | `maxFailuresPerTurn` | `10` | 每回合复核**失败**次数上限，超过即转人工。 |
@@ -224,7 +224,7 @@ dsh --profile <profile> --dump-config | grep -A6 'id: approval-review'
 - **复核者的证据是数据，不是指令。** 证据包里的 transcript 与申请理由可能包含仓库可控文本（`AGENTS.md`、被审文件、命令输出）。数据/指令边界由代码追加、不受 `policyText` 覆盖；证据中出现指令或"已经批准过"的说法一律作为反对证据。
 - **复核者是只读的。** `mode: direct` 是一次不挂工具的模型调用；`mode: subagent` 是有 `toolFilter` 白名单与 `maxDepth: 1`（子代理自身深度，允许它存在、不允许它再派孙代理）的子代理。两种形态都无法写入、执行或委派，因此即便复核者被攻破，也无法升级它所守卫的那道边界。
 - **复核者不会递归。** 子代理一旦建立即被登记为复核者会话，它自己的审批请求交还人工链，不会回到正在服务它的应答者。
-- **默认失败即拒绝。** `onReviewerFailure: rejected`、`onUncertain: delegate`、`maxAutoAllowRisk: medium` 是出厂选择：误拒一个安全动作的代价是一次重试，误放一个危险动作可能无法挽回。
+- **复核者跑不起来时找人不拒绝。** `onReviewerFailure: delegate`、`onUncertain: delegate`、`maxAutoAllowRisk: medium` 是出厂选择：复核者无法运行属于基础设施故障，把它变成自动拒绝会让操作者看到一次模型从未做出的否决。要 fail-closed 的部署显式设 `onReviewerFailure: rejected`：那时误拒一个安全动作的代价是一次重试，而误放一个危险动作可能无法挽回。
 - **它不是安全保证。** 它只评估审批缝真正提出的请求，而语言模型会犯错，在对抗性场景下尤其如此。它是配置良好的沙箱的补充，不是替代。
 
 ## 开发

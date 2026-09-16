@@ -102,7 +102,7 @@ schema defaults.
 | `maxAutoAllowRisk` | `medium` | Highest risk the reviewer may auto-allow. |
 | `onRiskExceeded` | `delegate` | `allow` / `delegate` / `deny` above that ceiling. |
 | `onUncertain` | `delegate` | Reviewer reported it could not decide. |
-| `onReviewerFailure` | `rejected` | Reviewer crashed, timed out, or answered off-schema. |
+| `onReviewerFailure` | `delegate` | Reviewer crashed, timed out, or answered off-schema. Defaults to **delegating**: a reviewer that could not run is an infrastructure problem, not a verdict — set `rejected` for the fail-closed stance. |
 | `budget.maxReviewsPerTurn` | `20` | Reviewer calls per open turn. |
 | `budget.onExhausted` | `delegate` | `delegate` / `deny` once spent. |
 | `maxFailuresPerTurn` | `10` | Reviewer *failures* per open turn before requests delegate. |
@@ -304,8 +304,10 @@ reconstructible from the log alone.
 - **The reviewer cannot recurse.** A reviewer child is registered as soon as it
   exists, so its own approval asks are delegated to the human chain instead of
   returning to the answerer serving it.
-- **Fail closed by default.** `onReviewerFailure: rejected`, `onUncertain:
-  delegate`, and `maxAutoAllowRisk: medium` are the shipping choices because
+- **A reviewer that cannot run asks a human.** `onReviewerFailure: delegate`,
+  `onUncertain: delegate`, and `maxAutoAllowRisk: medium` are the shipping
+  choices: refusing in the model's name would make an infrastructure failure
+  look like a judgement. Set `onReviewerFailure: rejected` for fail-closed, where
   refusing a safe action costs a retry while approving an unsafe one may be
   unrecoverable.
 - **It is not a security guarantee.** It evaluates only the requests the approval

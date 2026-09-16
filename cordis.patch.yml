@@ -62,9 +62,14 @@
         onRiskExceeded: delegate
         # Reviewer said it could not decide.
         onUncertain: delegate
-        # Reviewer crashed, timed out, or answered off-schema. `rejected` is the
-        # fail-closed stance; `delegate` hands the request to the human chain.
-        onReviewerFailure: rejected
+        # Reviewer crashed, timed out, or answered off-schema.
+        #
+        # `delegate` hands the request to the human chain: a reviewer that could
+        # not run is an INFRASTRUCTURE problem (a dead route, an expired
+        # credential, a timeout), and turning that into an automatic refusal
+        # makes the operator see a denial the model never made. `rejected` is the
+        # fail-closed alternative for deployments that prefer refusing to asking.
+        onReviewerFailure: delegate
         # Per-turn reviewer budget, so a loop cannot bill unlimited reviews.
         budget:
           maxReviewsPerTurn: 20

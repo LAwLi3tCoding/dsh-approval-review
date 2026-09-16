@@ -264,8 +264,10 @@ export const Config: Schema<Config> = Schema.object({
     .description('Reaction when a verdict exceeds `maxAutoAllowRisk`.'),
   onUncertain: Schema.union(UNCERTAINTY_ACTIONS).default('delegate')
     .description('Reaction when the reviewer reports uncertainty.'),
-  onReviewerFailure: Schema.union(FALLBACK_ACTIONS).default('rejected')
-    .description('Reaction when the reviewer crashes, times out, or answers off-schema.'),
+  onReviewerFailure: Schema.union(FALLBACK_ACTIONS).default('delegate')
+    .description('Reaction when the reviewer crashes, times out, or answers off-schema. '
+      + '`delegate` (default) hands the request to the human chain: a reviewer that could not '
+      + 'run is an infrastructure problem, not a judgement. `rejected` refuses instead.'),
 
   budget: Schema.object({
     maxReviewsPerTurn: Schema.number().step(1).min(1).default(20)
