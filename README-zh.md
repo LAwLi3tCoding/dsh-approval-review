@@ -14,7 +14,7 @@
 |---|---|
 | **走官方缝** | 注册在 `approval/request` 上的应答者，用 `prepend: true` 排在人类 UI 应答者之前，只认领自己策略范围内的请求，其余全部交还。 |
 | **第二个模型复核** | 复核者跑成**只读子代理**（`fork`），工具白名单只有 `read`/`glob`/`grep`，所以它能真去**读工作区**——"这个路径到底在不在仓库里"从猜测变成事实。`mode: direct` 可退回纯模型调用。 |
-| **失败即拒绝** | 复核崩溃、超时、输出被截断或不符合 schema 时走配置的失败策略，默认 `rejected`。证据不足永远不会变成放行。 |
+| **失败不静默** | 复核崩溃、超时、输出被截断或不符合 schema 时永远不会变成放行：走配置的失败策略，默认 `delegate`，即把请求交回人工链。要 fail-closed 就显式设 `onReviewerFailure: rejected`。证据不足永远不会变成放行。 |
 | **理由回到模型** | 否决理由会追加到被拒的工具结果里，并明确要求模型不得绕道重试同一目标。**放行理由走同一条通道**（受 `recordAllowedVerdicts` 控制）：审批结果是封闭词表，装不下任何文字，工具结果是插件唯一能持久写入的地方——没有它，页签只能显示"放行了"，永远显示不了"为什么放行"。 |
 | **风险闸门** | 裁决为 `allow` 但风险高于 `maxAutoAllowRisk` 时不会自动放行，而是转人工。 |
 | **熔断** | 连续否决与滑动窗口否决双阈值，对齐 Codex 的同回合熔断；触发后本回合后续请求转人工。 |
@@ -68,7 +68,7 @@ dsh --profile <profile> --dump-config | grep -A6 'id: approval-review'
 | `reviewer.provider` / `.model` | *(继承)* | 复核路由；不填则继承调用 Agent 自己的路由。会话内可用 `/approval-review model [<provider>/]<id>` 覆盖（**「审批」页签右上角可以直接选**：点开即列出本机配置的模型，候选来自客户端自己的模型目录服务 `modelDirectories`——和 `/model` 选择器、输入框里的模型座位读的是同一份目录。列表由插件自己渲染（原生 `datalist`/`select` 的弹层字号字重无法用 CSS 控制，会显得比页面吵），支持输入过滤、方向键+回车，也可以手打目录里没有的 id）。 |
 | `reviewer.subagentProvider` | `fork` | `mode: subagent` 用的子代理后端（`fork` / `spawn`）。 |
 | `reviewer.tools` | `[read, glob, grep]` | 复核子代理的工具白名单。留空会回退到只读默认，而不是继承父代理的全部工具。 |
-| `reviewer.timeoutMs` | `120000` | 单次复核的硬超时。慢路由 + 推理型复核者实测要 ~50 秒；超时不是「否决」，而是按失败策略走 fail-closed。 |
+| `reviewer.timeoutMs` | `120000` | 单次复核的硬超时。慢路由 + 推理型复核者实测要 ~50 秒；超时不是「否决」，而是按失败策略处理——出厂设置是转回人工链。 |
 | `reviewer.maxTokens` | `1024` | 输出上限。 |
 | `reviewer.temperature` | `0` | 采样温度。 |
 | `reviewer.policyText` | *(内置策略)* | 替换裁决策略正文。 |
@@ -194,7 +194,7 @@ dsh --profile <profile> --dump-config | grep -A6 'id: approval-review'
     │  · 输出：{decision, risk, reason, suggestion}  │
     │  · 超时与请求 signal 竞速                      │
     └───────────┬──────────────────────────────────┘
-                │ 裁决 | 失败（失败即拒绝）
+                │ 裁决 | 失败（按失败策略）
                 ▼
      放行 ─▶ allowed-once     否决 ─▶ rejected
             └▶ 理由追加到被接受结果  └▶ 理由追加到被拒的工具结果

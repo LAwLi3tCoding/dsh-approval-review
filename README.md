@@ -26,7 +26,7 @@ circuit breaker stops the agent from looping on escalation attempts.
 |---|---|
 | **Official seam** | An `approval/request` answerer registered with `prepend: true`, so it claims a request ahead of the human UI answerer, and delegates everything else back to the chain. |
 | **Second-model review** | A one-shot reviewer runs as a **read-only subagent** (`fork`) holding only `read`/`glob`/`grep`, so it can go READ the workspace — "is this path actually inside the repo?" becomes a fact, not a guess. `mode: direct` falls back to a plain model call over the evidence packet. |
-| **Fail closed** | A crashed, timed-out, truncated, or off-schema reviewer answer yields the configured failure policy, which defaults to `rejected`. Insufficient evidence never becomes an approval. |
+| **No silent failure** | A crashed, timed-out, truncated, or off-schema reviewer answer never becomes an approval: it yields the configured failure policy, which defaults to `delegate` — the request goes back to the human chain. Set `onReviewerFailure: rejected` for the fail-closed stance. |
 | **Rationale reaches the model** | A denial's reason is appended to the refused tool result, with an explicit instruction not to pursue the same outcome through a workaround. An **allow** verdict rides the same channel (gated by `recordAllowedVerdicts`): the approval outcome is a closed vocabulary, so the tool result is the only place the plugin can write durably — without it the card can show that an action ran but never why. |
 | **Risk gate** | An `allow` verdict above `maxAutoAllowRisk` does not auto-allow; it delegates to the human. |
 | **Circuit breaker** | Consecutive and rolling-window denial thresholds, matching Codex's per-turn breaker, after which further requests go to the human chain. |
@@ -88,7 +88,7 @@ schema defaults.
 | `reviewer.provider` / `.model` | *(inherit)* | Reviewer route; unset inherits the calling agent's own route. |
 | `reviewer.subagentProvider` | `fork` | Subagent backend for `mode: subagent` (`fork` / `spawn`). |
 | `reviewer.tools` | `[read, glob, grep]` | The reviewer child's tool allow-list. An empty list falls back to the read-only default rather than the parent's whole face. |
-| `reviewer.timeoutMs` | `120000` | Hard deadline for one reviewer call. A slow route plus a reasoning reviewer can take ~50s; a deadline that expires mid-review becomes a fail-closed refusal, not a verdict. |
+| `reviewer.timeoutMs` | `120000` | Hard deadline for one reviewer call. A slow route plus a reasoning reviewer can take ~50s; a deadline that expires mid-review becomes a failure-policy outcome (a delegation to the human by default), not a verdict. |
 | `reviewer.maxTokens` | `1024` | Output cap. |
 | `reviewer.temperature` | `0` | Sampling temperature. |
 | `reviewer.policyText` | *(shipping policy)* | Replaces the ruling policy text. |
@@ -254,7 +254,7 @@ crossed) through `::before` and an SVG mask.
    │  · output: {decision, risk, reason, suggest}  │
    │  · timeout raced against the request signal   │
    └───────────┬──────────────────────────────────┘
-               │ verdict | failure (fail-closed)
+               │ verdict | failure (failure policy)
                ▼
     allow ─▶ allowed-once     deny ─▶ rejected
                                     └▶ rationale appended to the refused
