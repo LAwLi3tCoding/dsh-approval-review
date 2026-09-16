@@ -49,14 +49,21 @@ describe('resolveToolPolicy', () => {
     expect(resolved.source).toContain('reviewTools')
   })
 
-  it('falls back to defaultPolicy for an unlisted tool', () => {
-    const resolved = resolveToolPolicy(config(), 'read', undefined, '{}')
+  it('routes an unlisted tool to the reviewer under the shipping defaults', () => {
+    // The shipping stance: a request is judged, not handed to a human prompt
+    // just because its tool name is absent from the table.
+    expect(resolveToolPolicy(config({}), 'web_fetch', undefined, '{}')).toMatchObject({ policy: 'ai' })
+  })
+
+  it('falls back to defaultPolicy when the table lists no matching tool', () => {
+    const resolved = resolveToolPolicy(config({ reviewTools: ['bash'], defaultPolicy: 'human' }), 'read', undefined, '{}')
     expect(resolved.policy).toBe('human')
     expect(resolved.source).toBe('defaultPolicy')
   })
 
   it('honours an explicit defaultPolicy override', () => {
-    expect(resolveToolPolicy(config({ defaultPolicy: 'never' }), 'read', undefined, '{}').policy).toBe('never')
+    const resolved = resolveToolPolicy(config({ reviewTools: [], defaultPolicy: 'never' }), 'read', undefined, '{}')
+    expect(resolved.policy).toBe('never')
   })
 
   it('lets a rule outrank the tool table', () => {
@@ -185,8 +192,8 @@ describe('Config schema', () => {
     const resolved = config()
     expect(resolved.enabled).toBe(true)
     expect(resolved.enabledByDefault).toBe(true)
-    expect(resolved.reviewTools).toEqual(['bash', 'pwsh', 'write'])
-    expect(resolved.defaultPolicy).toBe('human')
+    expect(resolved.reviewTools).toEqual(['*'])
+    expect(resolved.defaultPolicy).toBe('ai')
     expect(resolved.rules).toEqual([])
     expect(resolved.reviewer.timeoutMs).toBe(120000)
     expect(resolved.reviewer.maxTokens).toBe(1024)

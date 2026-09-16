@@ -61,8 +61,8 @@ dsh --profile <profile> --dump-config | grep -A6 'id: approval-review'
 |---|---|---|
 | `enabled` | `true` | 总开关。`false` 时插件仍挂载但不认领任何请求。 |
 | `enabledByDefault` | `true` | 会话初始的运行时开关状态。 |
-| `reviewTools` | `[bash, pwsh, write]` | 送往复核者的工具名 glob。 |
-| `defaultPolicy` | `human` | 未命中 glob 的工具走哪种策略：`ai` / `human` / `never`。 |
+| `reviewTools` | `['*']` | 送往复核者的工具名 glob。`*` = 所有工具，这是出厂立场：**由复核者裁决，而不是由工具名决定是否弹窗**。 |
+| `defaultPolicy` | `ai` | 未命中 glob 的工具走哪种策略：`ai` / `human` / `never`。默认 `ai`，所以漏配的工具也是**被裁决**，而不是悄悄退回人工。 |
 | `rules` | `[]` | 有序的 `{pattern, policy, field?, note?}` 正则规则，优先于工具表求值。`field` 可为 `reason`（默认）、`toolName`、`arguments`。 |
 | `reviewer.mode` | `subagent` | `subagent` 跑只读子代理（能读工作区）；`direct` 走一次性纯模型调用。 |
 | `reviewer.provider` / `.model` | *(继承)* | 复核路由；不填则继承调用 Agent 自己的路由。会话内可用 `/approval-review model [<provider>/]<id>` 覆盖（**「审批」页签右上角可以直接选**：点开即列出本机配置的模型，候选来自客户端自己的模型目录服务 `modelDirectories`——和 `/model` 选择器、输入框里的模型座位读的是同一份目录。列表由插件自己渲染（原生 `datalist`/`select` 的弹层字号字重无法用 CSS 控制，会显得比页面吵），支持输入过滤、方向键+回车，也可以手打目录里没有的 id）。 |
@@ -105,7 +105,11 @@ dsh --profile <profile> --dump-config | grep -A6 'id: approval-review'
 - **`human`** —— 用 `next()` 交还给应答链，也就是原本的审批弹窗。插件不会短路它。
 - **`never`** —— 直接 `rejected` 并附说明，不调复核、不弹窗。用于对某类工具做硬禁用。
 
-`edit` 故意**没有**放进默认 `reviewTools`：原地修改已有文件是日常操作里后果最重的一类，在部署方明确决定之前，它继续走人工审批。
+**出厂立场是「任何审批请求都先交给复核者」**（`reviewTools: ['*']` + `defaultPolicy: ai`），包括 `edit`、`web_fetch`、以及别的插件（如 `dsh-permission-rules` 的网络/路径规则）触发的 `ask`。风险不高就放行、风险高或复核者不确定才找人，闸门分别是 `maxAutoAllowRisk`、`onRiskExceeded`、`onUncertain`。
+
+代价是**每个请求一次复核模型调用**（十几秒到几十秒 + token），所以每回合的 `budget.maxReviewsPerTurn` 才是真正的刹车；想更保守的部署可以把 `reviewTools` 收窄回工具白名单，或把 `defaultPolicy` 设回 `human`。
+
+注意 `never` 规则（以及别的插件的确定性 `deny`）仍然在进入应答链**之前**硬拦——它们不是"审批请求"，是硬禁用。
 
 ### 示例：更严格的部署
 

@@ -198,10 +198,12 @@ export const Config: Schema<Config> = Schema.object({
     'Permission preset that turns auto-approval on. Empty means always claim. Set this to the '
     + 'preset key you added to `permissionPresets` (see cordis.patch.yml).',
   ),
-  reviewTools: Schema.array(Schema.string()).default(['bash', 'pwsh', 'write'])
-    .description('Tool-name glob patterns routed to the reviewer model.'),
-  defaultPolicy: Schema.union(TOOL_POLICIES).default('human').description(
-    'Policy for tools matching no `reviewTools` pattern.',
+  reviewTools: Schema.array(Schema.string()).default(['*'])
+    .description('Tool-name glob patterns routed to the reviewer model. `*` is every tool, '
+      + 'which is the shipping stance: the reviewer decides, not the tool name.'),
+  defaultPolicy: Schema.union(TOOL_POLICIES).default('ai').description(
+    'Policy for tools matching no `reviewTools` pattern. Defaults to `ai` so an unlisted '
+      + 'tool is still judged rather than handed to a human prompt by default.',
   ),
   rules: Schema.array(Schema.object({
     pattern: Schema.string().required(),

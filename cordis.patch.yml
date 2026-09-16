@@ -18,16 +18,21 @@
         enabled: true
         # Session-start default for that switch.
         enabledByDefault: true
-        # Tool names routed to the reviewer model. Everything else falls through
-        # to `defaultPolicy`, whose default delegates to the human answerer.
-        # `edit` is deliberately absent: in-place modification of an existing
-        # file is the highest-consequence routine action, so it keeps the human
-        # prompt until a deployment decides otherwise.
+        # EVERY request reaches the reviewer, not just a tool list.
+        #
+        # `*` matches every tool name, and `defaultPolicy: ai` covers a request
+        # whose tool is not in the table at all, so nothing falls through to a
+        # human prompt on account of its tool name. A request still goes to a
+        # human for a reason the operator can see — see `onRiskExceeded`,
+        # `onUncertain`, `onReviewerFailure`, `budget.onExhausted` — and a `never`
+        # rule (or another plugin's deterministic deny) still hard-stops the
+        # catastrophic few BEFORE the seam, which is the point of keeping them.
+        #
+        # The cost is one reviewer subagent per request (tens of seconds and a
+        # model call each), so `budget.maxReviewsPerTurn` is what bounds a turn.
         reviewTools:
-          - bash
-          - pwsh
-          - write
-        defaultPolicy: human
+          - '*'
+        defaultPolicy: ai
         # Ordered regex rules, evaluated before the tool table. `field` selects
         # what the pattern is matched against: `reason` (default), `toolName`, or
         # `arguments`.

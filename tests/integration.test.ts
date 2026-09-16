@@ -144,8 +144,10 @@ describe('approval answerer routing', () => {
     expect(reviewer.calls).toHaveLength(1)
   })
 
-  it('delegates an unlisted tool to the rest of the chain', async () => {
-    const { ctx, reviewer } = await mounted()
+  it('delegates a tool the deployment routes to a human', async () => {
+    // Explicitly configured, because the shipping default sends everything to
+    // the reviewer; this pins the `human` policy still delegates.
+    const { ctx, reviewer } = await mounted({ reviewTools: ['bash'], defaultPolicy: 'human' })
     const { agent } = fakeAgent()
 
     // No other answerer is mounted, so delegation lands on the seam's own
@@ -616,6 +618,7 @@ describe('reviewer recursion guard', () => {
 describe('the projection the card reads', () => {
   /** Mount the plugin with a projection-registry stub that captures its unit. */
   async function withProjection(overrides: Record<string, unknown> = {}) {
+    overrides = { reviewTools: ['bash'], defaultPolicy: 'human', ...overrides }
     const ctx = new Context()
     await ctx.plugin(ApprovalService)
     await ctx.plugin(CommandRuntime)
