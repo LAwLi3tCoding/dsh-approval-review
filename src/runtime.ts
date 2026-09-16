@@ -109,6 +109,8 @@ export class ReviewRuntime {
   private readonly reviewerSessions = new Set<string>()
   /** Latest folded audit state per session, for the live view defaults. */
   private readonly auditStates = new WeakMap<Session, AuditState>()
+  /** Sessions whose committed log has already been replayed into that fold. */
+  private readonly replayed = new WeakSet<Session>()
   /** Reused verdicts for identical actions, when the evidence allows it. */
   readonly cache: VerdictCache
 
@@ -174,6 +176,28 @@ export class ReviewRuntime {
    */
   observeEvent(session: Session, event: SessionEvent): void {
     this.sessions.observe(session, event)
+    if (!this.replayed.has(session)) {
+      this.replayed.add(session)
+      // Replay the committed log ONCE, the first time this session is seen.
+      //
+      // The incremental fold below only ever sees events from mount onward, so
+      // a durable `/approval-review on|off` or `model …` issued in a PREVIOUS
+      // process lifetime was invisible to the runtime: after a desktop restart
+      // the plugin silently fell back to inheriting the calling agent's model
+      // instead of honouring the operator's choice. The session PROJECtion
+      // replays the log, so the tab and the behaviour disagreed — the tab showed
+      // the chosen route while reviews ran on the inherited one.
+      //
+      // The event that triggered this call is already committed, so the replay
+      // covers it and no separate fold is applied.
+      let state = initAuditState()
+      for (let seq = 0; seq < session.seq; seq += 1) {
+        const committed = session.eventAt(seq as never)
+        if (committed !== undefined) state = applyAuditEvent(state, committed, this.config)
+      }
+      this.auditStates.set(session, state)
+      return
+    }
     const previous = this.auditStates.get(session) ?? initAuditState()
     this.auditStates.set(session, applyAuditEvent(previous, event, this.config))
   }

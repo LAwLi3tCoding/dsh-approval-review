@@ -646,6 +646,26 @@ describe('the projection the card reads', () => {
     return state.records[0]!
   }
 
+  it('honours a durable override that was already in the log at mount', async () => {
+    // After a restart the runtime starts with an empty fold. Without the replay
+    // it never sees the `/approval-review model …` from the previous process
+    // lifetime and silently inherits the agent's model instead — while the tab,
+    // which reads the replaying projection, still shows the chosen route.
+    const { ctx, reviewer } = await mounted()
+    const { agent } = fakeAgent([
+      { type: 'turn/start', data: { turn: 1 } },
+      { type: 'step/start', data: { turn: 1, step: 0 } },
+      { type: 'tool/call', data: { turn: 1, step: 0, callId: 'c', name: 'bash', arguments: '{"command":"ls"}' } },
+      { type: 'command/run', data: { commandId: 'c1', name: 'approval-review', args: 'model test/logged-model', source: 'user' } },
+    ])
+    // The first event this runtime observes for the session triggers the replay.
+    emitSessionEvent(ctx, agent.session, { type: 'tool/call', data: { turn: 1, step: 0, callId: 'c', name: 'bash', arguments: '{"command":"ls"}' } })
+
+    await ctx.approval.request(requestOf(agent, 'bash', 'c'))
+
+    expect(reviewer.calls[0]!.model).toBe('logged-model')
+  })
+
   it('stamps a delegated row with the policy that routed it, not `ai`', async () => {
     const unit = await withProjection()
     expect(unit).toBeDefined()
