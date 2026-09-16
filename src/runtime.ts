@@ -565,7 +565,15 @@ export class ReviewRuntime {
 
     this.putRefusal(callId, {
       marker: formatReviewMarker({
-        reason: verdict?.reason ?? gate.note,
+        // A reviewer that never answered must say WHY. `gate.note` only names
+        // the policy; the failure detail is what turns "the reviewer did not
+        // answer" into an actionable line (a rejected credential, a provider
+        // 404, a timeout). It was log-only, which made an unusable reviewer
+        // route indistinguishable from a decisive refusal.
+        reason: clampReason(
+          verdict?.reason ?? (failure === undefined ? gate.note : `${gate.note} — ${failure}`),
+          this.config.reasonMaxChars,
+        ),
         ...verdict?.suggestion === undefined ? {} : { suggestion: verdict.suggestion },
         ...verdict?.risk === undefined ? {} : { risk: verdict.risk },
         reviewerRoute: `${route.provider}/${route.model}`,
@@ -740,6 +748,22 @@ export class ReviewRuntime {
         return undefined
     }
   }
+}
+
+/**
+ * Bound a reason the plugin is about to publish.
+ *
+ * The marker rides the tool result, which is model context, so `reasonMaxChars`
+ * has to hold here rather than only in the config schema. This is also what
+ * keeps a provider's multi-line error digest from swallowing the guidance that
+ * follows it.
+ * @param reason - the assembled reason.
+ * @param max - configured cap.
+ * @returns the reason, truncated with an ellipsis when it exceeds the cap.
+ */
+export function clampReason(reason: string, max: number): string {
+  if (reason.length <= max) return reason
+  return `${reason.slice(0, Math.max(0, max - 1))}…`
 }
 
 /** Join the text of a content-block list, walking nested tool-result blocks. */

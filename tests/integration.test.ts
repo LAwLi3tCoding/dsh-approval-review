@@ -475,6 +475,20 @@ describe('refusal rationale delivery', () => {
     expect(text).toContain('Do not pursue the same outcome')
   })
 
+  it('names WHY the reviewer failed when it never answered', async () => {
+    // A failed reviewer used to refuse with a policy label only, so an unusable
+    // reviewer route (a rejected credential, an unknown model) looked exactly
+    // like a decisive denial. The failure text now rides the rationale.
+    const { ctx, reviewer } = await mounted()
+    reviewer.failure = new Error('401 invalid api key for provider openai-codex')
+    const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"ls"}'))
+    await ctx.approval.request(requestOf(agent, 'bash', 'c'))
+
+    const text = ((await postExecute(ctx, 'c')).feedback ?? []).map(block => block.text ?? '').join('\n')
+    expect(text).toContain('fail-closed')
+    expect(text).toContain('401 invalid api key')
+  })
+
   it('carries the risk grade and reviewer route into the durable marker', async () => {
     const { ctx, reviewer } = await mounted()
     reviewer.answer = '{"decision":"deny","risk":"critical","reason":"destructive","suggestion":"narrow the path"}'
