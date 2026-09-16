@@ -17,14 +17,26 @@ import { filterRoutes } from './model-choices.ts'
 export interface ModelPickerProps {
   /** Routes this deployment offers, in display order. */
   readonly choices: readonly string[]
+  /**
+   * Route id → the catalog's display name ("DeepSeek-V41-Flash" for
+   * `deepseek-official/deepseek-flash`). The id is what the command needs, but it
+   * is not the vendor's model name, and that mismatch reads as a bug.
+   */
+  readonly labels?: Readonly<Record<string, string>> | undefined
   /** Apply one shell command line (the picker emits `/approval-review model …`). */
   readonly runCommand: (line: string) => void
   /** Load the catalog on first use. */
-  readonly loadModels?: (() => Promise<readonly string[]>) | undefined
+  readonly loadModelRoutes?: (() => Promise<{
+    readonly routes: readonly string[]
+    readonly labels: Readonly<Record<string, string>>
+  }>) | undefined
   /** Whether to render copy in Chinese. */
   readonly zh: boolean
   /** Replaces the base list once the catalog arrives; base first. */
-  readonly onChoicesLoaded: (routes: readonly string[]) => void
+  readonly onRoutesLoaded: (loaded: {
+    readonly routes: readonly string[]
+    readonly labels: Readonly<Record<string, string>>
+  }) => void
 }
 
 const TEXT = 'var(--dsw-alias-label-primary, #e6edf3)'
@@ -35,7 +47,7 @@ const HOVER = 'var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.08))'
 const CODE = 'var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace)'
 
 /** The picker's field and its plugin-rendered list. */
-export function ModelPicker({ choices, runCommand, loadModels, zh, onChoicesLoaded }: ModelPickerProps): React.JSX.Element {
+export function ModelPicker({ choices, labels, runCommand, loadModelRoutes, zh, onRoutesLoaded }: ModelPickerProps): React.JSX.Element {
   const [draft, setDraft] = useState('')
   const [open, setOpen] = useState(false)
   const [highlight, setHighlight] = useState(0)
@@ -46,11 +58,11 @@ export function ModelPicker({ choices, runCommand, loadModels, zh, onChoicesLoad
 
   /** Fetch the catalog once, on first interaction. */
   const loadOnce = (): void => {
-    if (requestedRef.current || loadModels === undefined) return
+    if (requestedRef.current || loadModelRoutes === undefined) return
     requestedRef.current = true
-    void loadModels()
-      .then(routes => onChoicesLoaded(routes))
-      .catch(() => onChoicesLoaded([]))
+    void loadModelRoutes()
+      .then(loaded => onRoutesLoaded(loaded))
+      .catch(() => onRoutesLoaded({ routes: [], labels: {} }))
   }
 
   useEffect(() => {
@@ -82,6 +94,12 @@ export function ModelPicker({ choices, runCommand, loadModels, zh, onChoicesLoad
     background: 'transparent',
     color: TEXT,
     outline: 'none',
+  }
+
+  /** One row's text: the id that will be sent, plus the name a human recognizes. */
+  const textOf = (route: string): string => {
+    const name = labels?.[route]
+    return name === undefined ? route : `${route} · ${name}`
   }
 
   const itemStyle: CSSProperties = {
@@ -166,7 +184,7 @@ export function ModelPicker({ choices, runCommand, loadModels, zh, onChoicesLoad
               style={{ ...itemStyle, background: index === highlight ? HOVER : 'transparent' }}
               onMouseEnter={() => setHighlight(index)}
               onClick={() => apply(route)}
-            >{route}</button>
+            >{textOf(route)}</button>
           ))}
         </span>
       ) : null}

@@ -37,20 +37,25 @@ function routesOf(value: unknown): readonly string[] {
 }
 
 /**
- * Every route in a client model-directory snapshot (`modelDirectories` service).
+ * Routes AND their display names from a client model-directory snapshot.
  *
- * This is the SAME catalog the composer's model seat and the `/model` picker
- * read, so the reviewer picker offers exactly the models the deployment
- * configures locally — minus anything the catalog failed to load, which it
- * reports separately and which we deliberately do not guess at.
+ * The route id is what a command needs, but it is NOT the vendor's model name:
+ * `deepseek-official/deepseek-flash` is the harness catalog's id whose display
+ * name is "DeepSeek-V41-Flash", and a deployment's own providers name their
+ * routes freely. Showing both is what stops "that model is not in my
+ * subscription list" from being a mystery.
  * @param value - the directory state returned by `directoryFor(session).load()`.
- * @returns distinct `provider/model` labels in catalog order.
+ * @returns distinct route ids (catalog order) plus their display names.
  */
-export function routesFromDirectory(value: unknown): readonly string[] {
-  if (typeof value !== 'object' || value === null) return []
+export function directoryRoutes(value: unknown): {
+  readonly routes: readonly string[]
+  readonly labels: Readonly<Record<string, string>>
+} {
+  const routes: string[] = []
+  const labels: Record<string, string> = {}
+  if (typeof value !== 'object' || value === null) return { routes, labels }
   const groups = (value as { readonly groups?: unknown }).groups
-  if (!Array.isArray(groups)) return []
-  const out: string[] = []
+  if (!Array.isArray(groups)) return { routes, labels }
   for (const group of groups) {
     if (typeof group !== 'object' || group === null) continue
     const id = (group as { readonly id?: unknown }).id
@@ -61,10 +66,26 @@ export function routesFromDirectory(value: unknown): readonly string[] {
       const modelId = (model as { readonly id?: unknown }).id
       if (typeof modelId !== 'string' || modelId.length === 0) continue
       const route = `${id}/${modelId}`
-      if (!out.includes(route)) out.push(route)
+      if (!routes.includes(route)) routes.push(route)
+      const name = (model as { readonly name?: unknown }).name
+      if (typeof name === 'string' && name.length > 0 && name !== modelId) labels[route] = name
     }
   }
-  return out
+  return { routes, labels }
+}
+
+/**
+ * Every route in a client model-directory snapshot (`modelDirectories` service).
+ *
+ * This is the SAME catalog the composer's model seat and the `/model` picker
+ * read, so the reviewer picker offers exactly the models the deployment
+ * configures locally — minus anything the catalog failed to load, which it
+ * reports separately and which we deliberately do not guess at.
+ * @param value - the directory state returned by `directoryFor(session).load()`.
+ * @returns distinct `provider/model` labels in catalog order.
+ */
+export function routesFromDirectory(value: unknown): readonly string[] {
+  return directoryRoutes(value).routes
 }
 
 /**

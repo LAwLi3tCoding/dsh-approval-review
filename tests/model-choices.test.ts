@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { filterRoutes, reviewerRouteChoices, routesFromDirectory } from '../src/client/model-choices.ts'
+import { directoryRoutes, filterRoutes, reviewerRouteChoices, routesFromDirectory } from '../src/client/model-choices.ts'
 
 describe('reviewerRouteChoices', () => {
   it('lists the override in force first, then the session model, then allowed routes', () => {
@@ -117,5 +117,36 @@ describe('filterRoutes', () => {
 
   it('returns nothing when nothing matches, so the picker can say so', () => {
     expect(filterRoutes(ROUTES, 'nope')).toEqual([])
+  })
+})
+
+describe('directoryRoutes', () => {
+  it('pairs each route id with the catalog display name', () => {
+    const { routes, labels } = directoryRoutes({
+      groups: [{
+        id: 'deepseek-official',
+        models: [
+          { id: 'deepseek-flash', name: 'DeepSeek-V41-Flash' },
+          { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' },
+          // A name identical to the id says nothing, so it is not a label.
+          { id: 'same', name: 'same' },
+          { id: 'nameless' },
+        ],
+      }],
+    })
+    expect(routes).toEqual([
+      'deepseek-official/deepseek-flash',
+      'deepseek-official/deepseek-v4-pro',
+      'deepseek-official/same',
+      'deepseek-official/nameless',
+    ])
+    expect(labels['deepseek-official/deepseek-flash']).toBe('DeepSeek-V41-Flash')
+    expect(labels['deepseek-official/same']).toBeUndefined()
+    expect(labels['deepseek-official/nameless']).toBeUndefined()
+  })
+
+  it('degrades to an empty pair for an unloaded directory', () => {
+    expect(directoryRoutes(undefined)).toEqual({ routes: [], labels: {} })
+    expect(directoryRoutes({ status: 'loading' })).toEqual({ routes: [], labels: {} })
   })
 })

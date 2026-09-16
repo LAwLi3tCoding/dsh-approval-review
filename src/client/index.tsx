@@ -31,7 +31,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { LedgerView } from './LedgerView.tsx'
 import { installAccessModeGlyph } from './access-mode-glyph.ts'
-import { reviewerRouteChoices, routesFromDirectory } from './model-choices.ts'
+import { directoryRoutes, reviewerRouteChoices } from './model-choices.ts'
 import { runCommandLine, type CommandRemoteFace } from './run-command.ts'
 import type { ClientAuditView } from './types.ts'
 
@@ -89,16 +89,16 @@ function preferZh(): boolean {
  */
 export interface ApprovalReviewInjected {
   /**
+   * Load the locally configured reviewer routes with their display names.
+   * @returns route ids plus a route→display-name map.
+   */
+  loadModelRoutes: () => Promise<{ readonly routes: readonly string[]; readonly labels: Readonly<Record<string, string>> }>
+  /**
    * Execute one approval-review command line in this session.
    * @param line - the full command line, leading slash included.
    * @returns null when the host admitted it; a failure line otherwise.
    */
   runCommand: (line: string) => Promise<string | null>
-  /**
-   * Load the locally configured reviewer routes, as `provider/model`.
-   * @returns the catalog's routes, or an empty list when unavailable.
-   */
-  loadModels: () => Promise<readonly string[]>
 }
 
 /** Reviewer routes this deployment offers, read from its own projections. */
@@ -121,7 +121,7 @@ function ApprovalReviewLedger(props: SessionActionProps & ApprovalReviewInjected
     zh: preferZh(),
     runCommand: props.runCommand,
     modelChoices: reviewerChoices(props, current),
-    loadModels: props.loadModels,
+    loadModelRoutes: props.loadModelRoutes,
   })
 }
 
@@ -155,15 +155,15 @@ export function apply(ctx: ClientContext): void {
   // The seat hands the session id as a plain string; the command remote takes
   // the branded id, so the brand is reasserted at this one boundary.
   const inject = (rawSessionId: string): ApprovalReviewInjected => ({
-    loadModels: async () => {
+    loadModelRoutes: async () => {
       const directories = directoriesOf()
-      if (directories === undefined) return []
+      if (directories === undefined) return { routes: [], labels: {} }
       try {
         // The catalog load is shared and cached by the harness, so opening the
         // picker costs nothing after the composer's own model seat has loaded.
-        return routesFromDirectory(await directories.directoryFor(rawSessionId as SessionId).load())
+        return directoryRoutes(await directories.directoryFor(rawSessionId as SessionId).load())
       } catch {
-        return []
+        return { routes: [], labels: {} }
       }
     },
     runCommand: async (line: string) => {

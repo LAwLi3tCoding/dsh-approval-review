@@ -35,10 +35,14 @@ export interface LedgerViewProps {
    */
   readonly modelChoices?: readonly string[]
   /**
-   * Loads the locally configured routes on first use. Called when the picker
-   * opens, so the catalog is only fetched when someone actually picks a model.
+   * Loads the locally configured routes on first use, with their display names.
+   * Called when the picker opens, so the catalog is only fetched when someone
+   * actually picks a model.
    */
-  readonly loadModels?: () => Promise<readonly string[]>
+  readonly loadModelRoutes?: () => Promise<{
+    readonly routes: readonly string[]
+    readonly labels: Readonly<Record<string, string>>
+  }>
 }
 
 const TEXT = 'var(--dsw-alias-label-primary, #e6edf3)'
@@ -249,10 +253,12 @@ function useStartAtTop(root: React.RefObject<HTMLDivElement | null>): void {
   }, [root])
 }
 
-export function LedgerView({ view, zh, runCommand, modelChoices, loadModels }: LedgerViewProps): React.JSX.Element {
+export function LedgerView({ view, zh, runCommand, modelChoices, loadModelRoutes }: LedgerViewProps): React.JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null)
   useStartAtTop(rootRef)
   const [loadedChoices, setLoadedChoices] = useState<readonly string[] | undefined>(undefined)
+  /** Route id → the catalog's display name, when it differs from the id. */
+  const [modelLabels, setModelLabels] = useState<Readonly<Record<string, string>>>({})
   // A refused command used to look identical to a click that did nothing.
   const [commandError, setCommandError] = useState<string | null>(null)
   const run = (line: string): void => {
@@ -307,10 +313,12 @@ export function LedgerView({ view, zh, runCommand, modelChoices, loadModels }: L
           <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
             <ModelPicker
               choices={choices}
+              labels={modelLabels}
               runCommand={run}
-              loadModels={loadModels}
+              loadModelRoutes={loadModelRoutes}
               zh={zh}
-              onChoicesLoaded={(routes) => {
+              onRoutesLoaded={({ routes, labels }) => {
+                setModelLabels(labels)
                 setLoadedChoices(routes.length === 0 ? (modelChoices ?? []) : reviewerRoutesMerge(modelChoices ?? [], routes))
               }}
             />
