@@ -26,15 +26,16 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { assertObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import type { SubagentRun, SubagentStartRequest, SubagentStarter } from './subagent-types.ts'
 import { buildReviewerSystemPrompt, buildReviewerUserMessage, parseVerdict, type ReviewCallResult } from './reviewer.ts'
 import type { ReviewVerdict } from './review-types.ts'
 
 /**
- * The reviewer's requested structured output. An object-rooted schema is the
- * reliable channel: a subagent returns it validated rather than as text this
- * plugin has to salvage.
+ * The verdict shape the reviewer prompt states and the parser validates.
+ *
+ * Kept exported (and described here) because it is the contract between
+ * `buildReviewerSystemPrompt` and `parseVerdict`; it is deliberately NOT sent as
+ * the subagent's `outputSchema` — see the note at the dispatch site.
  */
 export const REVIEWER_OUTPUT_SCHEMA = {
   type: 'object',
@@ -135,9 +136,6 @@ export async function runSubagentReviewer(
     return { failure: 'cancelled before dispatch', durationMs: 0 }
   }
 
-  const schema = REVIEWER_OUTPUT_SCHEMA
-  assertObjectJsonSchema(schema)
-
   // The evidence message is built by the SAME function the direct reviewer uses,
   // so the untrusted-data fence and the redaction path cannot drift apart
   // between the two modes.
@@ -173,7 +171,23 @@ export async function runSubagentReviewer(
     // `subagent depth 1 exceeds maxDepth 0` on every review, which the
     // fail-closed default then turned into a silent automatic denial.
     maxDepth: 1,
-    outputSchema: schema as unknown as SubagentStartRequest['outputSchema'],
+    // NO `outputSchema`, deliberately. Requesting one makes the in-process
+    // driver inject a `structured_output` TOOL the child must CALL to deliver
+    // its answer, and the driver then rewrites a naturally-finished run:
+    //
+    //   if (structured !== undefined) {
+    //     if (structured.captured !== undefined) return { output, structured, stopReason }
+    //     if (stopReason === 'completed') return { output, stopReason: 'error' }
+    //   }
+    //   // subagent-in-process-driver/src/index.ts
+    //
+    // Our reviewer prompt instead demands "ONE JSON object and nothing else",
+    // and the model complies — so the tool is never called, a COMPLETED child is
+    // reported as `error`, and the caller discards a perfectly good verdict
+    // (observed: a landable `{decision: allow, ...}` in the child's own log,
+    // thrown away as "reviewer child ended with error"). The verdict is parsed
+    // from the child's text instead, which is the same contract `mode: direct`
+    // has always used.
     ...input.provider === undefined && input.model === undefined
       ? {}
       : {

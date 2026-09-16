@@ -11,7 +11,6 @@ import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
-  REVIEWER_OUTPUT_SCHEMA,
   runSubagentReviewer,
   type SubagentReviewInput,
 } from '../src/subagent-reviewer.ts'
@@ -155,10 +154,21 @@ describe('runSubagentReviewer wiring', () => {
     expect(stub.calls[0]!.request.toolFilter).toEqual({ allow: ['read', 'glob', 'grep'] })
   })
 
-  it('requests the structured verdict schema', async () => {
+  it('does NOT request a structured-output schema', async () => {
+    // Requesting one makes the driver inject a `structured_output` tool the child
+    // must call, then rewrites a completed run to `error` when it answers in text
+    // instead. That is how a landable verdict got thrown away as a failure.
     const stub = new FakeSubagents()
     await runSubagentReviewer(mounted(stub), input())
-    expect(stub.calls[0]!.request.outputSchema).toEqual(REVIEWER_OUTPUT_SCHEMA)
+    expect(stub.calls[0]!.request.outputSchema).toBeUndefined()
+  })
+
+  it('parses the verdict out of the child text answer', async () => {
+    const stub = new FakeSubagents()
+    stub.structured = undefined
+    stub.text = 'Thinking…\n{"decision":"deny","risk":"high","reason":"exfiltrates the token"}'
+    const result = await runSubagentReviewer(mounted(stub), input())
+    expect(result.verdict).toMatchObject({ decision: 'deny', risk: 'high' })
   })
 
   it('passes the reviewer route through only when configured', async () => {
