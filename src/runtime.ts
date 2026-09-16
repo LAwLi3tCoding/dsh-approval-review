@@ -11,6 +11,7 @@
  * @module dsh-approval-review/runtime
  */
 
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
@@ -36,6 +37,8 @@ import {
   buildReviewerSystemPrompt,
   buildReviewerUserMessage,
   redactToolArguments,
+  renderArguments,
+  redactUnparsedText,
   renderTranscript,
   resolveReviewerRoute,
   runReviewerCall,
@@ -46,6 +49,8 @@ import type { ReviewVerdict, ToolPolicy } from './review-types.ts'
 import { ReviewSessions, type GuardLimits } from './review-session.ts'
 import { VerdictCache } from './verdict-cache.ts'
 import { runSubagentReviewer } from './subagent-reviewer.ts'
+import { createInspector } from './inspection.ts'
+import { resolveOutputLanguage } from './output-language.ts'
 
 /** A refusal this plugin resolved, awaiting delivery into the refused tool result. */
 export interface Refusal {
@@ -94,6 +99,7 @@ export function guardLimits(config: Config): GuardLimits {
  */
 export class ReviewRuntime {
   private readonly sessions = new ReviewSessions()
+  private readonly pendingStops = new WeakMap<Session, { agent: Agent; callId: string }>()
   /** Refusals by callId, consumed by the `tools/post-execute` listener. */
   private readonly refusals = new Map<string, Refusal>()
   /** Allow verdicts by callId, consumed by the `tools/post-execute` listener. */
@@ -126,7 +132,7 @@ export class ReviewRuntime {
 
   /** Whether the cache may be consulted: no transcript means the verdict is replayable. */
   private get cacheUsable(): boolean {
-    return this.config.context.turns === 0 && this.cache.enabled
+    return this.config.context.turns === 0 && this.config.reviewer.mode === 'direct' && !this.config.reviewer.inspectLocalState && this.cache.enabled
   }
 
   /**
@@ -175,6 +181,13 @@ export class ReviewRuntime {
    * @param event - the committed event.
    */
   observeEvent(session: Session, event: SessionEvent): void {
+    const stop = this.pendingStops.get(session)
+    if (stop !== undefined && event.type === 'tool/result' && event.data.message.content.some(block => block.type === 'tool-result' && block.toolCallId === stop.callId)) {
+      this.pendingStops.delete(session)
+      // The refusal is durable before cancelling the turn; preserve queued user input.
+      stop.agent.cancel({ kind: 'hook', reason: 'approval reviewer rejection circuit breaker' }, { keepInbox: true })
+    }
+    if (event.type === 'turn/start') this.pendingStops.delete(session)
     this.sessions.observe(session, event)
     if (!this.replayed.has(session)) {
       this.replayed.add(session)
@@ -283,8 +296,13 @@ export class ReviewRuntime {
    * @param session - the session the authorization belongs to.
    * @param override - the authorization to record.
    */
-  recordOverride(session: Session, override: { toolName: string; at: number; reviewId?: string }): void {
-    this.sessions.addOverride(session, override, this.limits)
+  recordOverride(session: Session, override: { toolName: string; at: number; reviewId?: string; callId?: string }): boolean {
+    const raw = this.argumentsFor(session, override.callId)
+    if (raw.length === 0) return false
+    this.sessions.addOverride(session, {
+      ...override, fingerprint: VerdictCache.fingerprint(override.toolName, raw),
+    }, this.limits)
+    return true
   }
 
 
@@ -370,8 +388,12 @@ export class ReviewRuntime {
       return await next()
     }
 
-    const override = this.sessions.consumeOverride(session, req.toolName, this.limits)
+    const override = this.sessions.consumeOverride(session, req.toolName, this.limits, VerdictCache.fingerprint(req.toolName, rawArguments))
     if (this.sessions.circuitOpen(session, this.limits) && override === undefined) {
+      if (this.config.circuitBreaker.action === 'stop') {
+        req.agent.cancel({ kind: 'hook', reason: 'approval reviewer rejection circuit breaker' }, { keepInbox: true })
+        return 'rejected'
+      }
       if (this.config.circuitBreaker.action === 'deny') {
         this.putRefusal(req.callId, {
           marker: formatReviewMarker({
@@ -455,13 +477,22 @@ export class ReviewRuntime {
       this.config.reviewer.argumentMaxChars,
       this.config.reviewer.argumentsBudgetChars,
     )
+    // Never approve a truncated command whose hidden suffix may change its effect.
+    try {
+      if (!rawArguments || argumentsText !== renderArguments(JSON.parse(rawArguments), Number.MAX_SAFE_INTEGER, 0)) {
+        return await this.delegate(req, 'incomplete-action-evidence', next)
+      }
+    } catch {
+      return await this.delegate(req, 'invalid-action-evidence', next)
+    }
     const transcript = this.buildTranscript(session)
+    const userIntent = this.buildUserIntent(session)
 
     // Reuse a recent verdict for a byte-identical action. Only sound with no
     // transcript in evidence, because otherwise the verdict also depends on the
     // conversation and could not be replayed from the action alone.
-    const fingerprint = VerdictCache.fingerprint(req.toolName, rawArguments)
-    if (this.cacheUsable) {
+    const fingerprint = VerdictCache.fingerprint(session.id, JSON.stringify([req.toolName, rawArguments, req.reason, userIntent, route]))
+    if (this.cacheUsable && override === undefined) {
       const cached = this.cache.get(fingerprint)
       if (cached !== undefined) {
         this.cacheHits += 1
@@ -480,6 +511,9 @@ export class ReviewRuntime {
     }
 
     this.sessions.noteReview(session)
+    // Resolved per review, exactly like the command output: a language switch
+    // reaches the NEXT verdict. Prose already recorded is never rewritten.
+    const outputLanguage = resolveOutputLanguage(this.ctx, this.config)
     const result = this.config.reviewer.mode === 'subagent'
       ? await runSubagentReviewer(this.ctx, {
         ...this.reviewerProviderFor(session) === undefined ? {} : { provider: this.reviewerProviderFor(session)! },
@@ -495,20 +529,29 @@ export class ReviewRuntime {
           toolName: req.toolName,
           argumentsText,
           transcript,
+          userIntent,
           ...req.reason === undefined ? {} : { askReason: req.reason },
         },
         ...this.config.reviewer.policyText === undefined ? {} : { policyText: this.config.reviewer.policyText },
         ...this.config.reviewer.guidance === undefined ? {} : { guidance: this.config.reviewer.guidance },
+        outputLanguage,
+        exactActionApproval: override !== undefined,
         ...req.signal === undefined ? {} : { signal: req.signal },
       })
       : await runReviewerCall(
         this.ctx,
         route,
-        buildReviewerSystemPrompt(this.config.reviewer),
+        buildReviewerSystemPrompt({
+          ...this.config.reviewer.policyText === undefined ? {} : { policyText: this.config.reviewer.policyText },
+          ...this.config.reviewer.guidance === undefined ? {} : { guidance: this.config.reviewer.guidance },
+          outputLanguage,
+          exactActionApproval: override !== undefined,
+        }),
         buildReviewerUserMessage({
           toolName: req.toolName,
           argumentsText,
           transcript,
+          userIntent,
           ...req.reason === undefined ? {} : { askReason: req.reason },
         }),
         {
@@ -517,10 +560,11 @@ export class ReviewRuntime {
           timeoutMs: this.config.reviewer.timeoutMs,
           ...req.signal === undefined ? {} : { signal: req.signal },
           sessionId: session.id,
+          ...!this.config.reviewer.inspectLocalState || session.header.cwd === undefined ? {} : { inspect: createInspector(session.header.cwd, rawArguments, redactUnparsedText) },
         },
       )
     if (result.verdict === undefined) this.sessions.noteFailure(session)
-    else if (this.cacheUsable) this.cache.put(fingerprint, result.verdict)
+    else if (this.cacheUsable && override === undefined) this.cache.put(fingerprint, result.verdict)
 
     return await this.settle(req, session, policySource, route, result.verdict, result.durationMs, override, next, result.failure)
   }
@@ -554,12 +598,13 @@ export class ReviewRuntime {
     /* v8 ignore next -- callers reject callId-less requests before reaching here */
     if (callId === undefined) return await next()
 
+    if (req.signal?.aborted === true) return 'cancelled'
     const gate = applyVerdictGates(this.config, verdict)
     if (gate.action === 'delegate') {
       this.ctx.logger('dsh-approval-review').info(
         `delegating tool "${req.toolName}" to the human chain: ${gate.note}${failure === undefined ? '' : ` (${failure})`}`,
       )
-      return await this.delegate(req, verdict === undefined ? 'reviewer-failure' : 'uncertain', next)
+      return await this.delegate(req, verdict === undefined ? 'reviewer-failure' : gate.note, next)
     }
 
     if (gate.action === 'allow') {
@@ -573,6 +618,8 @@ export class ReviewRuntime {
             reason: verdict?.reason ?? gate.note,
             ...verdict?.suggestion === undefined ? {} : { suggestion: verdict.suggestion },
             ...verdict?.risk === undefined ? {} : { risk: verdict.risk },
+        ...verdict?.userAuthorization === undefined ? {} : { userAuthorization: verdict.userAuthorization },
+        overridden: override !== undefined,
             // A route is only meaningful when a reviewer actually answered.
             ...verdict === undefined ? {} : { reviewerRoute: `${route.provider}/${route.model}` },
             durationMs,
@@ -595,11 +642,14 @@ export class ReviewRuntime {
         // 404, a timeout). It was log-only, which made an unusable reviewer
         // route indistinguishable from a decisive refusal.
         reason: clampReason(
-          verdict?.reason ?? (failure === undefined ? gate.note : `${gate.note} — ${failure}`),
+          verdict === undefined ? (failure === undefined ? gate.note : `${gate.note} — ${failure}`)
+            : verdict.decision === 'allow' ? `${gate.note}: ${verdict.reason}` : verdict.reason,
           this.config.reasonMaxChars,
         ),
         ...verdict?.suggestion === undefined ? {} : { suggestion: verdict.suggestion },
         ...verdict?.risk === undefined ? {} : { risk: verdict.risk },
+        ...verdict?.userAuthorization === undefined ? {} : { userAuthorization: verdict.userAuthorization },
+        overridden: override !== undefined,
         reviewerRoute: `${route.provider}/${route.model}`,
         durationMs,
         uncertain: verdict?.uncertain === true,
@@ -608,6 +658,9 @@ export class ReviewRuntime {
       hardStop: true,
     })
     this.recordDecision(session, true)
+    if (this.config.circuitBreaker.action === 'stop' && this.sessions.circuitOpen(session, this.limits)) {
+      this.pendingStops.set(session, { agent: req.agent, callId })
+    }
     this.ctx.logger('dsh-approval-review').info(
       `refused ${req.toolName} (${policySource}): ${verdict?.reason ?? gate.note}`,
     )
@@ -738,12 +791,29 @@ export class ReviewRuntime {
     return renderTranscript(lines, this.config.context.maxChars)
   }
 
+  /** Keep original intent and latest real user constraints independently of tool noise. */
+  buildUserIntent(session: Session): string {
+    const messages: string[] = []
+    for (let seq = 0; seq < session.seq; seq += 1) {
+      const event = session.eventAt(seq as never)
+      if (event?.type !== 'user/message' || event.data.source?.kind !== 'user') continue
+      const text = blocksToText(event.data.content)
+      if (text) messages.push(text)
+    }
+    if (messages.length === 0) return ''
+    // Reserve the first request plus the latest requests/corrections. JSON
+    // encoding prevents message contents from forging evidence role boundaries.
+    const selected = messages.length <= 5 ? messages : [messages[0]!, ...messages.slice(-4)]
+    return JSON.stringify({ source: session.header.origin === 'subagent' ? 'delegated agent task; not direct human authorization' : 'host user messages', omittedMessages: messages.length - selected.length,
+      messages: selected.map(text => text.length <= 3000 ? text : `${text.slice(0, 1500)}\n[message middle omitted]\n${text.slice(-1500)}`) })
+  }
+
   /** Render one event into a transcript line, or skip it. */
   private transcriptLine(event: SessionEvent): TranscriptLine | undefined {
     switch (event.type) {
       case 'user/message': {
         const text = blocksToText(event.data.content)
-        return text.length === 0 ? undefined : { role: 'user', text }
+        return text.length === 0 ? undefined : { role: event.data.source?.kind === 'user' ? 'user' : 'tool', text }
       }
       case 'assistant/message': {
         if (!this.config.context.includeAssistant) return undefined

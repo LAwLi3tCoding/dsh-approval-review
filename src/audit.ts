@@ -26,7 +26,7 @@ import type {} from '@deepseek-ai/dsh-session-projection/types'
 // Type-only: bring the `command/run` session-event declaration into scope so the
 // fold can narrow on it.
 import type {} from '@deepseek-ai/dsh-commands/types'
-import type { RiskLevel, ReviewOutcome, ToolPolicy } from './review-types.ts'
+import type { UserAuthorization, RiskLevel, ReviewOutcome, ToolPolicy } from './review-types.ts'
 
 /** The projection key the card reads. */
 export const AUDIT_PROJECTION_KEY = 'approvalReview'
@@ -105,6 +105,7 @@ export interface AuditRecord {
   /** Actionable safer alternative the reviewer suggested. */
   readonly suggestion?: string
   /** Risk grade the reviewer reported. */
+  readonly userAuthorization?: UserAuthorization
   readonly risk?: RiskLevel
   /** Reviewer route, when it is recorded in the refusal marker. */
   readonly reviewerRoute?: string
@@ -260,14 +261,14 @@ export function applyAuditEvent(
         ...callId === undefined ? {} : { callId },
         turn: state.turn,
         step: state.step,
-        startedAt: Date.now(),
+        startedAt: event.time,
         policy: routed.policy,
         policySource: routed.source,
         ...event.data.reason === undefined ? {} : { askReason: event.data.reason },
         ...preview === undefined ? {} : { argumentsPreview: preview },
         refused: false,
         uncertain: false,
-        overridden: state.pendingOverrides > 0,
+        overridden: false,
       }
       const pendingOverrides = record.overridden ? state.pendingOverrides - 1 : state.pendingOverrides
       return {
@@ -306,7 +307,7 @@ export function applyAuditEvent(
       const action = args.split(/\s+/u)[0]
       if (action === 'on') return { ...state, enabledOverride: true }
       if (action === 'off') return { ...state, enabledOverride: false }
-      if (action === 'approve') return { ...state, pendingOverrides: state.pendingOverrides + 1 }
+      if (action === 'approve') return state // Pending grants live only in ReviewSessions; never revive on replay.
       if (action === 'model') {
         const value = args.split(/\s+/u).slice(1).join(' ').trim()
         // `model default` clears both halves back to the deployment default.
@@ -351,9 +352,11 @@ export function applyAuditEvent(
           reason: parsed.reason,
           ...parsed.suggestion === undefined ? {} : { suggestion: parsed.suggestion },
           ...parsed.risk === undefined ? {} : { risk: parsed.risk },
+          ...parsed.userAuthorization === undefined ? {} : { userAuthorization: parsed.userAuthorization },
           ...parsed.reviewerRoute === undefined ? {} : { reviewerRoute: parsed.reviewerRoute },
           ...parsed.durationMs === undefined ? {} : { durationMs: parsed.durationMs },
           uncertain: parsed.uncertain,
+          overridden: parsed.overridden === true,
         }
       })
       return changed ? { ...state, records } : state
@@ -436,8 +439,10 @@ function callIdOfToolResult(event: Extract<SessionEvent, { type: 'tool/result' }
 
 /** Fields recovered out of a refusal marker. */
 interface ParsedMarker {
+  readonly overridden?: boolean
   readonly reason: string
   readonly suggestion?: string
+  readonly userAuthorization?: UserAuthorization
   readonly risk?: RiskLevel
   readonly reviewerRoute?: string
   readonly durationMs?: number
@@ -459,14 +464,20 @@ export function parseReviewMarker(text: string): ParsedMarker | undefined {
   const lines = body.split('\n').map(line => line.trim()).filter(line => line.length > 0)
   let reason: string | undefined
   let suggestion: string | undefined
+  let userAuthorization: UserAuthorization | undefined
   let risk: RiskLevel | undefined
   let reviewerRoute: string | undefined
   let durationMs: number | undefined
+  let overridden = false
   let uncertain = false
   for (const line of lines) {
-    if (line.startsWith('reason:')) reason = line.slice('reason:'.length).trim()
+    if (line === 'exact-action-approval: true') overridden = true
+    else if (line.startsWith('reason:')) reason = line.slice('reason:'.length).trim()
     else if (line.startsWith('suggestion:')) suggestion = line.slice('suggestion:'.length).trim()
-    else if (line.startsWith('risk:')) {
+    else if (line.startsWith('authorization:')) {
+      const value = line.slice('authorization:'.length).trim()
+      if (['high', 'medium', 'low', 'unknown'].includes(value)) userAuthorization = value as UserAuthorization
+    } else if (line.startsWith('risk:')) {
       const value = line.slice('risk:'.length).trim()
       if (RISK_VALUES.includes(value)) risk = value as RiskLevel
     } else if (line.startsWith('reviewer:')) reviewerRoute = line.slice('reviewer:'.length).trim()
@@ -479,8 +490,10 @@ export function parseReviewMarker(text: string): ParsedMarker | undefined {
   return {
     reason,
     uncertain,
+    ...overridden ? { overridden: true } : {},
     ...suggestion === undefined || suggestion.length === 0 ? {} : { suggestion },
     ...risk === undefined ? {} : { risk },
+    ...userAuthorization === undefined ? {} : { userAuthorization },
     ...reviewerRoute === undefined || reviewerRoute.length === 0 ? {} : { reviewerRoute },
     ...durationMs === undefined ? {} : { durationMs },
   }
@@ -494,7 +507,9 @@ export function parseReviewMarker(text: string): ParsedMarker | undefined {
  * @returns the marker block, terminated by a newline.
  */
 export function formatReviewMarker(input: {
+  readonly overridden?: boolean
   readonly reason: string
+  readonly userAuthorization?: UserAuthorization
   readonly risk?: RiskLevel
   readonly suggestion?: string
   readonly reviewerRoute?: string
@@ -505,9 +520,10 @@ export function formatReviewMarker(input: {
   // line, so a newline inside a value would forge a field boundary.
   const lines = [
     REVIEW_MARKER,
-    `reason: ${oneLine(input.reason)}`,
+    ...input.overridden === true ? ['exact-action-approval: true'] : [],    `reason: ${oneLine(input.reason)}`,
     ...input.suggestion === undefined ? [] : [`suggestion: ${oneLine(input.suggestion)}`],
     ...input.risk === undefined ? [] : [`risk: ${input.risk}`],
+    ...input.userAuthorization === undefined ? [] : [`authorization: ${input.userAuthorization}`],
     ...input.reviewerRoute === undefined ? [] : [`reviewer: ${oneLine(input.reviewerRoute)}`],
     ...input.durationMs === undefined ? [] : [`duration: ${input.durationMs}`],
     `confidence: ${input.uncertain === true ? 'uncertain' : 'decided'}`,

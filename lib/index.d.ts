@@ -22,6 +22,7 @@ import "@deepseek-ai/dsh-session-projection";
 type ToolPolicy = 'ai' | 'human' | 'never';
 /** Risk grades a reviewer may report, ordered from least to most dangerous. */
 type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
+type UserAuthorization = 'high' | 'medium' | 'low' | 'unknown';
 //#endregion
 //#region src/config.d.ts
 /** How the plugin reacts to a reviewer verdict that exceeds the risk threshold. */
@@ -33,7 +34,7 @@ type FallbackAction = 'rejected' | 'delegate' | 'allow-once';
 /** What happens once the per-turn review budget is spent. */
 type BudgetAction = 'delegate' | 'deny';
 /** What happens once the rejection circuit breaker trips. */
-type CircuitAction = 'delegate' | 'deny';
+type CircuitAction = 'delegate' | 'deny' | 'stop';
 /** One ordered regex rule that routes a request by matching its text. */
 interface RiskRuleConfig {
   /** Regular expression source, matched against {@link field}. */
@@ -57,6 +58,8 @@ interface ReviewerConfig {
   readonly model?: string;
   /** Subagent backend used by `mode: 'subagent'`. */
   readonly subagentProvider: string;
+  /** Isolated read-only local inspection, with a fixed four-call budget. */
+  readonly inspectLocalState: boolean;
   /**
    * The reviewer child's tool allow-list. Mutable to match Schemastery's
    * inferred `string[]`; the plugin never writes it.
@@ -176,8 +179,21 @@ interface Config {
    * call; turning it off leaves allowed rows rationale-less in the card.
    */
   readonly recordAllowedVerdicts: boolean;
-  /** Language of the `/approval-review` command output. */
-  readonly language: 'en' | 'zh';
+  /**
+   * Language of every piece of prose this plugin EMITS: the `/approval-review`
+   * command output and the reviewer's own `reason`/`suggestion` fields.
+   *
+   * `auto` (the default) follows the harness's own language preference —
+   * `设置 → 通用 → 语言`, the `locale` settings namespace — and is resolved at
+   * each call, so a switch applies to the next command and the next verdict
+   * without a restart. An explicit `en`/`zh` pins it regardless of that setting.
+   *
+   * What it never touches: the wire enums (`allow`/`deny`, `low`/…), which the
+   * parser validates as English tokens, and text already RECORDED in the session
+   * log. A verdict's prose is part of the transcript the model reads, so it is
+   * frozen at decision time and is never retroactively translated.
+   */
+  readonly language: 'auto' | 'en' | 'zh';
 }
 /** Schema for {@link Config}; the loader validates against this at mount time. */
 declare const Config: Schema<Config>;
@@ -214,6 +230,7 @@ interface AuditRecord {
   /** Actionable safer alternative the reviewer suggested. */
   readonly suggestion?: string;
   /** Risk grade the reviewer reported. */
+  readonly userAuthorization?: UserAuthorization;
   readonly risk?: RiskLevel;
   /** Reviewer route, when it is recorded in the refusal marker. */
   readonly reviewerRoute?: string;
@@ -305,6 +322,22 @@ declare function auditView(state: AuditState, defaults: {
   readonly defaultReviewerProvider: string;
 }): AuditView;
 //#endregion
+//#region src/output-language.d.ts
+/** A language this plugin can emit prose in. */
+type OutputLanguage = 'en' | 'zh';
+/** The `language` setting: an explicit language, or follow the harness. */
+type LanguageSetting = OutputLanguage | 'auto';
+/**
+ * Whether the resolved output language is Chinese.
+ *
+ * @param ctx - host context whose optional settings service owns the section.
+ * @param config - resolved plugin config (only `language` is read).
+ * @returns true when emitted prose should be Chinese.
+ */
+declare function outputIsZh(ctx: Context, config: {
+  readonly language: LanguageSetting;
+}): boolean;
+//#endregion
 //#region src/index.d.ts
 declare const name = "approval-review";
 /**
@@ -318,4 +351,4 @@ declare function emptyView(config: Config): ReturnType<typeof auditView>;
 /** Register the answerer, the rationale carrier, the command, and the card feed. */
 declare function apply(ctx: Context, config: Config): void;
 //#endregion
-export { Config, type Config as ConfigShape, apply, emptyView, inject, name };
+export { Config, type Config as ConfigShape, apply, emptyView, inject, name, outputIsZh };

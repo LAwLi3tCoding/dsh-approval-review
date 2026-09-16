@@ -179,12 +179,12 @@ describe('applyVerdictGates', () => {
 
   it('delegates an allow above the risk ceiling by default', () => {
     const gate = applyVerdictGates(config(), { decision: 'allow', risk: 'critical', uncertain: false })
-    expect(gate.action).toBe('delegate')
+    expect(gate.action).toBe('deny')
     expect(gate.note).toContain('critical')
   })
 
   it('honours onRiskExceeded allow and deny', () => {
-    expect(applyVerdictGates(config({ onRiskExceeded: 'allow' }), { decision: 'allow', risk: 'critical', uncertain: false }).action).toBe('allow')
+    expect(applyVerdictGates(config({ onRiskExceeded: 'allow' }), { decision: 'allow', risk: 'critical', uncertain: false }).action).toBe('deny')
     expect(applyVerdictGates(config({ onRiskExceeded: 'deny' }), { decision: 'allow', risk: 'critical', uncertain: false }).action).toBe('deny')
   })
 
@@ -210,7 +210,7 @@ describe('Config schema', () => {
     expect(resolved.reviewer.argumentsBudgetChars).toBe(16000)
     expect(resolved.context.turns).toBe(2)
     expect(resolved.context.maxChars).toBe(6000)
-    expect(resolved.maxAutoAllowRisk).toBe('medium')
+    expect(resolved.maxAutoAllowRisk).toBe('high')
     expect(resolved.onRiskExceeded).toBe('delegate')
     expect(resolved.onUncertain).toBe('delegate')
     expect(resolved.onReviewerFailure).toBe('delegate')
@@ -219,12 +219,12 @@ describe('Config schema', () => {
     expect(resolved.circuitBreaker.consecutiveDenials).toBe(3)
     expect(resolved.circuitBreaker.windowDenials).toBe(10)
     expect(resolved.circuitBreaker.windowSize).toBe(50)
-    expect(resolved.circuitBreaker.action).toBe('delegate')
+    expect(resolved.circuitBreaker.action).toBe('stop')
     expect(resolved.override.ttlMs).toBe(300000)
     expect(resolved.override.maxPending).toBe(10)
     expect(resolved.reasonMaxChars).toBe(2000)
     expect(resolved.feedReasonToModel).toBe(true)
-    expect(resolved.language).toBe('en')
+    expect(resolved.language).toBe('auto')
   })
 
   it('keeps a nested override instead of discarding sibling defaults', () => {
@@ -243,10 +243,10 @@ describe('Config schema', () => {
 })
 
 describe('reviewer mode and new budgets', () => {
-  it('defaults to the subagent reviewer with a read-only tool face', () => {
+  it('defaults to isolated direct review and offers a read-only subagent option', () => {
     const resolved = config()
-    expect(resolved.reviewer.mode).toBe('subagent')
-    expect(resolved.reviewer.subagentProvider).toBe('fork')
+    expect(resolved.reviewer.mode).toBe('direct')
+    expect(resolved.reviewer.subagentProvider).toBe('spawn')
     expect(resolved.reviewer.tools).toEqual(['read', 'glob', 'grep'])
   })
 
@@ -261,11 +261,30 @@ describe('reviewer mode and new budgets', () => {
   it('defaults the failure budget and verdict cache', () => {
     const resolved = config()
     expect(resolved.maxFailuresPerTurn).toBe(10)
-    expect(resolved.verdictCache.ttlMs).toBe(60000)
+    expect(resolved.verdictCache.ttlMs).toBe(0)
     expect(resolved.verdictCache.maxEntries).toBe(256)
   })
 
   it('allows disabling the verdict cache', () => {
     expect(config({ verdictCache: { ttlMs: 0 } }).verdictCache.ttlMs).toBe(0)
+  })
+})
+
+
+describe('authorization-aware risk policy', () => {
+  it.each(['low', 'medium'] as const)('allows routine %s risk without demanding explicit authorization', risk => {
+    expect(applyVerdictGates(config(), { decision: 'allow', risk, uncertain: false, userAuthorization: 'unknown' }).action).toBe('allow')
+  })
+  it.each(['high', 'medium', 'low', 'unknown'] as const)('gates high risk by authorization %s and scope', userAuthorization => {
+    for (const scopeBounded of [true, false]) {
+      const result = applyVerdictGates(config(), { decision: 'allow', risk: 'high', uncertain: false, userAuthorization, scopeBounded })
+      expect(result.action).toBe(scopeBounded && ['high', 'medium'].includes(userAuthorization) ? 'allow' : 'delegate')
+    }
+  })
+  it('preserves an explicitly lower deployment ceiling', () => {
+    expect(applyVerdictGates(config({ maxAutoAllowRisk: 'medium' }), { decision: 'allow', risk: 'high', uncertain: false, userAuthorization: 'high', scopeBounded: true }).action).toBe('delegate')
+  })
+  it('never allows a critical verdict through uncertainty or risk bypass settings', () => {
+    expect(applyVerdictGates(config({ onUncertain: 'allow', onRiskExceeded: 'allow' }), { decision: 'allow', risk: 'critical', uncertain: true }).action).toBe('deny')
   })
 })

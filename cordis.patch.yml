@@ -7,8 +7,7 @@
 # Layer semantics: an id-targeted override REPLACES this whole config row, so a
 # deployment that overrides any key must restate every key it still wants.
 # Dropping `reviewTools` returns the tool table to its schema default, and
-# dropping `defaultPolicy` returns unlisted tools to `human` — i.e. back to the
-# ordinary approval prompt.
+# dropping `defaultPolicy` returns unlisted tools to the schema default `ai`.
 - insert:
     - id: approval-review
       name: dsh-approval-review
@@ -28,7 +27,7 @@
         # rule (or another plugin's deterministic deny) still hard-stops the
         # catastrophic few BEFORE the seam, which is the point of keeping them.
         #
-        # The cost is one reviewer subagent per request (tens of seconds and a
+        # The cost is one independent reviewer call per request (tens of seconds and a
         # model call each), so `budget.maxReviewsPerTurn` is what bounds a turn.
         reviewTools:
           - '*'
@@ -40,9 +39,10 @@
         # Reviewer model, prompt, and size limits. `provider`/`model` unset means
         # the reviewer inherits the calling agent's own route.
         reviewer:
+          mode: direct
           # 120s, not 60s: a reasoning reviewer on a slower route measured 52.5s
           # here, and a deadline that expires mid-review is not a "no" — it is a
-          # fail-closed refusal under the default `onReviewerFailure: rejected`.
+          # human handoff under the default `onReviewerFailure: delegate`.
           timeoutMs: 120000
           maxTokens: 1024
           temperature: 0
@@ -51,14 +51,14 @@
           # policyText: |            # replaces the shipping ruling policy
           #   <your policy wording>
           # guidance: <extra deployment-specific guidance>
-        # Transcript evidence handed to the reviewer; `turns: 0` sends none.
+        # Transcript evidence handed to the reviewer; `turns: 0` omits recent transcript, not selected user intent.
         context:
           turns: 2
           maxChars: 6000
           includeAssistant: true
           includeToolActivity: true
         # Risk gate: an allow verdict above this grade is not auto-allowed.
-        maxAutoAllowRisk: medium
+        maxAutoAllowRisk: high
         onRiskExceeded: delegate
         # Reviewer said it could not decide.
         onUncertain: delegate
@@ -80,7 +80,7 @@
           consecutiveDenials: 3
           windowDenials: 10
           windowSize: 50
-          action: delegate
+          action: stop
         # One-shot `/approval-review approve [n]` authorization.
         override:
           ttlMs: 300000
@@ -97,7 +97,11 @@
         # cost is one short marker block in the model's context per auto-allowed
         # call; turning it off empties the "rationale" line of allowed rows.
         recordAllowedVerdicts: true
-        language: en
+        # Command output follows the harness language setting
+        # (设置 → 通用 → 语言), resolved per invocation so a switch reaches the
+        # next command without a restart. This row used to pin `en`, which made
+        # `/approval-review` answer in English whatever the picker said.
+        language: auto
 
 # --- "Approve for me" as a PEER access-mode option -------------------------
 #

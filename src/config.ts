@@ -22,7 +22,7 @@ export type FallbackAction = 'rejected' | 'delegate' | 'allow-once'
 export type BudgetAction = 'delegate' | 'deny'
 
 /** What happens once the rejection circuit breaker trips. */
-export type CircuitAction = 'delegate' | 'deny'
+export type CircuitAction = 'delegate' | 'deny' | 'stop'
 
 /** One ordered regex rule that routes a request by matching its text. */
 export interface RiskRuleConfig {
@@ -49,6 +49,8 @@ export interface ReviewerConfig {
   readonly model?: string
   /** Subagent backend used by `mode: 'subagent'`. */
   readonly subagentProvider: string
+  /** Isolated read-only local inspection, with a fixed four-call budget. */
+  readonly inspectLocalState: boolean
   /**
    * The reviewer child's tool allow-list. Mutable to match Schemastery's
    * inferred `string[]`; the plugin never writes it.
@@ -174,8 +176,21 @@ export interface Config {
    * call; turning it off leaves allowed rows rationale-less in the card.
    */
   readonly recordAllowedVerdicts: boolean
-  /** Language of the `/approval-review` command output. */
-  readonly language: 'en' | 'zh'
+  /**
+   * Language of every piece of prose this plugin EMITS: the `/approval-review`
+   * command output and the reviewer's own `reason`/`suggestion` fields.
+   *
+   * `auto` (the default) follows the harness's own language preference —
+   * `设置 → 通用 → 语言`, the `locale` settings namespace — and is resolved at
+   * each call, so a switch applies to the next command and the next verdict
+   * without a restart. An explicit `en`/`zh` pins it regardless of that setting.
+   *
+   * What it never touches: the wire enums (`allow`/`deny`, `low`/…), which the
+   * parser validates as English tokens, and text already RECORDED in the session
+   * log. A verdict's prose is part of the transcript the model reads, so it is
+   * frozen at decision time and is never retroactively translated.
+   */
+  readonly language: 'auto' | 'en' | 'zh'
 }
 
 const REVIEWER_MODES: readonly ReviewerMode[] = ['subagent', 'direct']
@@ -184,7 +199,7 @@ const RISK_GATE_ACTIONS: readonly RiskGateAction[] = ['allow', 'delegate', 'deny
 const UNCERTAINTY_ACTIONS: readonly UncertaintyAction[] = ['delegate', 'allow', 'deny']
 const FALLBACK_ACTIONS: readonly FallbackAction[] = ['rejected', 'delegate', 'allow-once']
 const BUDGET_ACTIONS: readonly BudgetAction[] = ['delegate', 'deny']
-const CIRCUIT_ACTIONS: readonly CircuitAction[] = ['delegate', 'deny']
+const CIRCUIT_ACTIONS: readonly CircuitAction[] = ['delegate', 'deny', 'stop']
 
 /** Schema for {@link Config}; the loader validates against this at mount time. */
 export const Config: Schema<Config> = Schema.object({
@@ -214,13 +229,14 @@ export const Config: Schema<Config> = Schema.object({
 
   reviewer: Schema.object({
     // eslint-disable-next-line
-    mode: Schema.union(REVIEWER_MODES).default('subagent').description(
-      'How the reviewer runs: `subagent` forks a read-only child that can inspect the '
+    mode: Schema.union(REVIEWER_MODES).default('direct').description(
+      'How the reviewer runs: `subagent` starts a read-only child that can inspect the '
       + 'workspace; `direct` makes one plain model call with the evidence packet only.',
     ),
     provider: Schema.string().description('Reviewer provider route; unset inherits the calling agent.'),
     model: Schema.string().description('Reviewer model id; unset inherits the calling agent.'),
-    subagentProvider: Schema.string().default('fork').description(
+    inspectLocalState: Schema.boolean().default(true).description('Allow up to four bounded read-only local inspections in direct mode; no shell, writes or network.'),
+    subagentProvider: Schema.string().default('spawn').description(
       'Subagent backend for `mode: subagent` (`fork` / `spawn`).',
     ),
     tools: Schema.array(Schema.string()).default(['read', 'glob', 'grep']).description(
@@ -258,7 +274,7 @@ export const Config: Schema<Config> = Schema.object({
   // so `{}` is the correct seed even though the type demands the filled shape.
   }).default({}),
 
-  maxAutoAllowRisk: Schema.union(RISK_LEVELS).default('medium')
+  maxAutoAllowRisk: Schema.union(RISK_LEVELS).default('high')
     .description('Highest risk the reviewer may auto-allow.'),
   onRiskExceeded: Schema.union(RISK_GATE_ACTIONS).default('delegate')
     .description('Reaction when a verdict exceeds `maxAutoAllowRisk`.'),
@@ -282,10 +298,10 @@ export const Config: Schema<Config> = Schema.object({
     .description('Maximum reviewer failures per open turn before requests delegate.'),
 
   verdictCache: Schema.object({
-    ttlMs: Schema.number().step(1).min(0).default(60000)
+    ttlMs: Schema.number().step(1).min(0).default(0)
       .description('Reuse a recent verdict for an identical tool+arguments fingerprint; 0 disables. '
-        + 'Only consulted when `context.turns` is 0, because a transcript-dependent verdict is not '
-        + 'replayable from the action alone.'),
+        + 'Only consulted in direct mode when `context.turns` is 0; session and user intent are included. '
+        + 'Leave disabled when the decision depends on mutable local state.'),
     maxEntries: Schema.number().step(1).min(0).default(256)
       .description('Maximum cached fingerprints before oldest-eviction.'),
   // @ts-expect-error Schemastery cannot express "every field has its own default",
@@ -299,7 +315,7 @@ export const Config: Schema<Config> = Schema.object({
       .description('Denials within `windowSize` that trip the breaker; 0 disables the window rule.'),
     windowSize: Schema.number().step(1).min(1).default(50)
       .description('Rolling window size for `windowDenials`.'),
-    action: Schema.union(CIRCUIT_ACTIONS).default('delegate')
+    action: Schema.union(CIRCUIT_ACTIONS).default('stop')
       .description('Reaction once the breaker is open.'),
   // @ts-expect-error Schemastery cannot express "every field has its own default",
   // so `{}` is the correct seed even though the type demands the filled shape.
@@ -322,8 +338,12 @@ export const Config: Schema<Config> = Schema.object({
     .description('Append the reviewer allow verdict to the accepted tool result, so the audit ledger '
       + 'can show why an action was allowed. Costs one short marker block in the model context per '
       + 'auto-allowed call.'),
-  language: Schema.union(['en', 'zh'] as const).default('en')
-    .description('Language of `/approval-review` command output.'),
+  language: Schema.union(['auto', 'en', 'zh'] as const).default('auto')
+    .description('Language of the prose this plugin emits — `/approval-review` command output and the '
+      + "reviewer's reason/suggestion fields: `auto` follows the harness language setting "
+      + '(Settings → General → Language), `en`/`zh` pin it. Resolved per call, so a switch applies to '
+      + 'the next command and the next verdict; the wire enums stay English and recorded prose is '
+      + 'never rewritten.'),
 })
 
 /**
@@ -400,7 +420,7 @@ export function resolveToolPolicy(
  */
 export function applyVerdictGates(
   config: Config,
-  verdict: { decision: 'allow' | 'deny'; risk: RiskLevel; uncertain: boolean } | undefined,
+  verdict: { decision: 'allow' | 'deny'; risk: RiskLevel; uncertain: boolean; userAuthorization?: string; scopeBounded?: boolean } | undefined,
 ): { readonly action: 'allow' | 'deny' | 'delegate'; readonly note: string } {
   if (verdict === undefined) {
     switch (config.onReviewerFailure) {
@@ -408,6 +428,13 @@ export function applyVerdictGates(
       case 'delegate': return { action: 'delegate', note: 'reviewer did not answer; `onReviewerFailure: delegate`' }
       default: return { action: 'deny', note: 'reviewer did not answer; fail-closed (`onReviewerFailure: rejected`)' }
     }
+  }
+  if (verdict.risk === 'critical') {
+    return { action: 'deny', note: 'critical risk cannot be automatically approved' }
+  }
+  if (verdict.risk === 'high' && (verdict.decision === 'allow' || verdict.uncertain) &&
+      (!(verdict.userAuthorization === 'high' || verdict.userAuthorization === 'medium') || verdict.scopeBounded !== true)) {
+    return { action: 'delegate', note: 'high risk requires substantive user authorization and bounded scope' }
   }
   if (verdict.uncertain) {
     switch (config.onUncertain) {

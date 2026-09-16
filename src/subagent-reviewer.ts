@@ -11,8 +11,7 @@
  * Safety is structural, not prompt-based:
  * - the child's tool face is restricted with `toolFilter`, so the named tools
  *   vanish from its prompt AND refuse to execute (one visibility);
- * - `maxDepth: 1` is the child's own depth: it may exist, and it may not
- *   delegate further (a grandchild would be depth 2);
+ * - maxDepth is parentDepth + 1; tools cannot delegate further;
  * - it has no write or exec tool, so a compromised reviewer cannot act on the
  *   boundary it is guarding;
  * - a child that exists for the duration of a review is REGISTERED with the
@@ -27,7 +26,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SubagentRun, SubagentStartRequest, SubagentStarter } from './subagent-types.ts'
-import { buildReviewerSystemPrompt, buildReviewerUserMessage, parseVerdict, type ReviewCallResult } from './reviewer.ts'
+import { buildReviewerSystemPrompt, buildReviewerUserMessage, parseVerdict, type ReviewCallResult, type ReviewEvidence } from './reviewer.ts'
 import type { ReviewVerdict } from './review-types.ts'
 
 /**
@@ -61,7 +60,7 @@ export interface SubagentReviewInput {
   readonly reviewerTools: readonly string[]
   /** Hard deadline in milliseconds. */
   readonly timeoutMs: number
-  /** The agent the approval request belongs to; the child is forked from it. */
+  /** The agent the approval request belongs to; the child is composed from it. */
   readonly parent: Agent
   /**
    * Called with the child's session id as soon as the child exists. The runtime
@@ -70,16 +69,18 @@ export interface SubagentReviewInput {
    */
   readonly registerChildSession?: (sessionId: string) => () => void
   /** The evidence packet, already bounded and redacted. */
-  readonly evidence: {
-    readonly toolName: string
-    readonly argumentsText: string
-    readonly transcript: string
-    readonly askReason?: string
-  }
+  readonly evidence: ReviewEvidence
+  readonly exactActionApproval?: boolean
+
   /** Ruling policy text; the shipping policy when unset. */
   readonly policyText?: string
   /** Extra deployment guidance. */
   readonly guidance?: string
+  /**
+   * Language for the verdict's prose fields, resolved by the caller from the
+   * harness language setting. Omitted keeps the historical English prompt.
+   */
+  readonly outputLanguage?: 'en' | 'zh'
   /** Cancellation from the approval request. */
   readonly signal?: AbortSignal
 }
@@ -114,7 +115,7 @@ function describeSubagentFailure(error: unknown): string {
 }
 
 /**
- * Run one reviewer as a forked subagent and return its verdict.
+ * Run one reviewer as an optional read-only subagent and return its verdict.
  *
  * Every failure path resolves rather than throwing, so the answerer never fails
  * open: a missing provider, a timeout, a cancelled turn, or a child that
@@ -139,38 +140,29 @@ export async function runSubagentReviewer(
   // The evidence message is built by the SAME function the direct reviewer uses,
   // so the untrusted-data fence and the redaction path cannot drift apart
   // between the two modes.
-  const evidence = buildReviewerUserMessage({
-    toolName: input.evidence.toolName,
-    argumentsText: input.evidence.argumentsText,
-    transcript: input.evidence.transcript,
-    ...input.evidence.askReason === undefined ? {} : { askReason: input.evidence.askReason },
+  const evidence = buildReviewerUserMessage(input.evidence)
+  const persona = buildReviewerSystemPrompt({
+    ...input.policyText === undefined ? {} : { policyText: input.policyText },
+    ...input.guidance === undefined ? {} : { guidance: input.guidance },
+    ...input.outputLanguage === undefined ? {} : { outputLanguage: input.outputLanguage },
+    exactActionApproval: input.exactActionApproval === true,
   })
-  const prompt: ContentBlock[] = [
-    {
-      type: 'text',
-      text: `${buildReviewerSystemPrompt({ ...input.policyText === undefined ? {} : { policyText: input.policyText }, ...input.guidance === undefined ? {} : { guidance: input.guidance } })}\n\nYou may read the workspace with read/glob/grep to check the evidence. Do not attempt to run, modify, or approve anything. Return the verdict as the structured result.`,
-    },
-    ...evidence.content,
-  ]
+  const prompt: ContentBlock[] = evidence.content
+  const controller = new AbortController()
 
+  const readTools = input.reviewerTools.filter(tool => ['read', 'glob', 'grep'].includes(tool))
   const request: SubagentStartRequest = {
     label: `approval-review: ${input.evidence.toolName}`,
     prompt,
+    persona,
     parent: input.parent,
-    signal: input.signal ?? new AbortController().signal,
+    signal: controller.signal,
     // The reviewer is a READER. An empty allow-list would leave it with the
     // parent's whole tool face, so a misconfigured empty list is refused here
     // rather than silently widening the child.
-    toolFilter: input.reviewerTools.length > 0 ? { allow: [...input.reviewerTools] } : { allow: ['read', 'glob', 'grep'] },
-    // `maxDepth` is the child's ABSOLUTE delegation depth, not "how many more
-    // levels from here": the seam computes `parentDepth + 1` and rejects a cap
-    // it would exceed. The reviewer child therefore sits at depth 1, and 1 is
-    // the smallest cap that lets it start at all — while still refusing any
-    // grandchild it might try to spawn (depth 2). `0` reads like "no further
-    // delegation" and is in fact "never start": it threw
-    // `subagent depth 1 exceeds maxDepth 0` on every review, which the
-    // fail-closed default then turned into a silent automatic denial.
-    maxDepth: 1,
+    toolFilter: { allow: readTools.length > 0 ? readTools : ['read', 'glob', 'grep'] },
+    // Nested parent agents need a reviewer at their own next depth.
+    maxDepth: (input.parent.session.header?.delegationDepth ?? 0) + 1,
     // NO `outputSchema`, deliberately. Requesting one makes the in-process
     // driver inject a `structured_output` TOOL the child must CALL to deliver
     // its answer, and the driver then rewrites a naturally-finished run:
@@ -201,26 +193,30 @@ export async function runSubagentReviewer(
   let run: SubagentRun | undefined
   let releaseChild: (() => void) | undefined
   let timedOut = false
-  const timer = setTimeout(() => { timedOut = true }, input.timeoutMs)
+  let finished = false
+  let rejectDeadline!: (error: Error) => void
+  const deadline = new Promise<never>((_resolve, reject) => { rejectDeadline = reject })
+  const cancel = (): void => {
+    controller.abort()
+    rejectDeadline(new Error('review cancelled'))
+  }
+  input.signal?.addEventListener('abort', cancel, { once: true })
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+    rejectDeadline(new Error(`reviewer timed out after ${input.timeoutMs} ms`))
+  }, input.timeoutMs)
   try {
-    const started0 = subagents.start(input.reviewerProvider, request)
-    const raced = await Promise.race([
-      started0,
-      new Promise<never>((_resolve, reject) => {
-        setTimeout(() => reject(new Error('reviewer start exceeded its deadline')), input.timeoutMs)
-      }),
-    ])
-    run = raced
-    // Mark the child BEFORE awaiting its result: its first step can already
-    // raise an approval, and an unmarked child would be reviewed by the very
-    // answerer this review is serving.
-    releaseChild = input.registerChildSession?.(raced.id)
-    const result = await Promise.race([
-      raced.result,
-      new Promise<never>((_resolve, reject) => {
-        setTimeout(() => reject(new Error(`reviewer timed out after ${input.timeoutMs} ms`)), input.timeoutMs)
-      }),
-    ])
+    const pending = subagents.start(input.reviewerProvider, request).then(handle => {
+      // A provider may ignore cancellation while starting. Dispose late handles
+      // without delaying the parent approval or leaking a child.
+      if (finished) { void handle.dispose().catch(() => undefined); return handle }
+      run = handle
+      releaseChild = input.registerChildSession?.(handle.id)
+      return handle
+    })
+    const raced = await Promise.race([pending, deadline])
+    const result = await Promise.race([raced.result, deadline])
     const durationMs = Date.now() - started
     if (timedOut) return { failure: `reviewer timed out after ${input.timeoutMs} ms`, durationMs }
     if (result.stopReason !== 'completed') {
@@ -253,12 +249,14 @@ export async function runSubagentReviewer(
       durationMs: Date.now() - started,
     }
   } finally {
+    finished = true
     clearTimeout(timer)
-    // The child's mark is released only after its run settles, so an ask that
-    // races the last step still finds the child registered.
-    releaseChild?.()
-    // A settled-but-undisposed run leaks its child session; disposal is
-    // idempotent, so it is safe on every path including the failure ones.
-    if (run !== undefined) await run.dispose().catch(() => undefined)
+    input.signal?.removeEventListener('abort', cancel)
+    controller.abort()
+    // Do not let an unresponsive provider's disposal defeat the review deadline.
+    // Keep its reviewer identity until disposal actually settles.
+    if (run !== undefined) {
+      void run.dispose().catch(() => undefined).finally(() => releaseChild?.())
+    } else releaseChild?.()
   }
 }

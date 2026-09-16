@@ -19,6 +19,7 @@ export type ToolPolicy = 'ai' | 'human' | 'never'
 
 /** Risk grades a reviewer may report, ordered from least to most dangerous. */
 export type RiskLevel = 'low' | 'medium' | 'high' | 'critical'
+export type UserAuthorization = 'high' | 'medium' | 'low' | 'unknown'
 
 /** Every {@link RiskLevel}, least to most dangerous (index is the rank). */
 export const RISK_LEVELS: readonly RiskLevel[] = ['low', 'medium', 'high', 'critical']
@@ -116,6 +117,10 @@ export interface ReviewRecord {
 
 /** The reviewer's structured answer, already validated and normalized. */
 export interface ReviewVerdict {
+  /** Assessed independently of intrinsic risk; missing legacy values are unknown. */
+  readonly userAuthorization?: UserAuthorization
+  /** Whether the action's targets and side effects are narrowly bounded. */
+  readonly scopeBounded?: boolean
   /** `allow` proceeds; `deny` refuses. */
   readonly decision: ReviewDecision
   /** One-sentence rationale shown to the user and fed back to the model. */

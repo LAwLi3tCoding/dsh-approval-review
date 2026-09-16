@@ -12,6 +12,7 @@
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { filterRoutes } from './model-choices.ts'
+import type { ApprovalReviewTranslate } from './locale.ts'
 
 /** Props for the picker. */
 export interface ModelPickerProps {
@@ -30,8 +31,12 @@ export interface ModelPickerProps {
     readonly routes: readonly string[]
     readonly labels: Readonly<Record<string, string>>
   }>) | undefined
-  /** Whether to render copy in Chinese. */
-  readonly zh: boolean
+  /**
+   * Translate function for this plugin's copy, bound to the ACTIVE harness
+   * locale (the ledger's own `t` seat; a language switch hands out a new
+   * reference, so this list re-renders with the tab).
+   */
+  readonly t: ApprovalReviewTranslate
   /** Replaces the base list once the catalog arrives; base first. */
   readonly onRoutesLoaded: (loaded: {
     readonly routes: readonly string[]
@@ -47,7 +52,7 @@ const HOVER = 'var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.08))'
 const CODE = 'var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace)'
 
 /** The picker's field and its plugin-rendered list. */
-export function ModelPicker({ choices, labels, runCommand, loadModelRoutes, zh, onRoutesLoaded }: ModelPickerProps): React.JSX.Element {
+export function ModelPicker({ choices, labels, runCommand, loadModelRoutes, t, onRoutesLoaded }: ModelPickerProps): React.JSX.Element {
   const [draft, setDraft] = useState('')
   const [open, setOpen] = useState(false)
   const [highlight, setHighlight] = useState(0)
@@ -125,8 +130,8 @@ export function ModelPicker({ choices, labels, runCommand, loadModelRoutes, zh, 
         value={draft}
         role="combobox"
         aria-expanded={open}
-        aria-label={zh ? '复核模型' : 'reviewer model'}
-        placeholder={zh ? '选择或输入模型' : 'pick or type a model'}
+        aria-label={t('pickModel')}
+        placeholder={t('pickPlaceholder')}
         style={fieldStyle}
         onFocus={() => { loadOnce(); setOpen(true) }}
         onClick={() => { loadOnce(); setOpen(true) }}
@@ -171,9 +176,7 @@ export function ModelPicker({ choices, labels, runCommand, loadModelRoutes, zh, 
         >
           {matches.length === 0 ? (
             <span style={{ ...itemStyle, color: MUTED, cursor: 'default' }}>
-              {choices.length === 0
-                ? (zh ? '没有可选模型，直接输入 id 后回车' : 'no models to pick from — type an id and press Enter')
-                : (zh ? '没有匹配的模型' : 'no matching model')}
+              {choices.length === 0 ? t('noModels') : t('noMatch')}
             </span>
           ) : matches.map((route, index) => (
             <button

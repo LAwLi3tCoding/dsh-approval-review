@@ -5,11 +5,11 @@
 **Codex-style agent auto-approval for DeepSeek Harness.** When an action crosses a
 boundary that the sandbox does not cover on its own, a second, independent
 reviewer model reads the proposed action and returns a verdict — so a human
-approves nothing routine, and nothing unsafe slips through. Every decision leaves
+handles fewer routine prompts. Model judgements can still be wrong. Each reviewed decision leaves
 a full rationale in a dedicated Approvals tab.
 
 This plugin implements the shape of Codex's
-[Auto-review](https://developers.openai.com/codex/concepts/sandboxing/auto-review):
+[Auto-review](https://learn.chatgpt.com/docs/sandboxing/auto-review):
 an interactive approval request is routed to a reviewer agent instead of a person,
 the reviewer answers with a structured verdict, a denial is handed back to the
 calling model as reasoning rather than as a bare error, and a per-turn rejection
@@ -25,17 +25,27 @@ circuit breaker stops the agent from looping on escalation attempts.
 | | |
 |---|---|
 | **Official seam** | An `approval/request` answerer registered with `prepend: true`, so it claims a request ahead of the human UI answerer, and delegates everything else back to the chain. |
-| **Second-model review** | A one-shot reviewer runs as a **read-only subagent** (`fork`) holding only `read`/`glob`/`grep`, so it can go READ the workspace — "is this path actually inside the repo?" becomes a fact, not a guess. `mode: direct` falls back to a plain model call over the evidence packet. |
+| **Second-model review** | Default `direct` receives the policy, an explicit evidence packet and a bounded local read-only inspector. Optional `subagent/spawn` offers read-only investigation but retains DSH preset inheritance. |
 | **No silent failure** | A crashed, timed-out, truncated, or off-schema reviewer answer never becomes an approval: it yields the configured failure policy, which defaults to `delegate` — the request goes back to the human chain. Set `onReviewerFailure: rejected` for the fail-closed stance. |
 | **Rationale reaches the model** | A denial's reason is appended to the refused tool result, with an explicit instruction not to pursue the same outcome through a workaround. An **allow** verdict rides the same channel (gated by `recordAllowedVerdicts`): the approval outcome is a closed vocabulary, so the tool result is the only place the plugin can write durably — without it the card can show that an action ran but never why. |
 | **Risk gate** | An `allow` verdict above `maxAutoAllowRisk` does not auto-allow; it delegates to the human. |
-| **Circuit breaker** | Consecutive and rolling-window denial thresholds, matching Codex's per-turn breaker, after which further requests go to the human chain. |
+| **Circuit breaker** | Consecutive and rolling-window denial thresholds, matching Codex's per-turn breaker, which stop the host turn after the triggering denial has been recorded by default. |
 | **Budgets** | A per-turn cap on reviewer calls, so a loop cannot bill unlimited reviews. |
-| **One-shot override** | `/approval-review approve [n]` records a human authorization for one retry. The reviewer still decides; it just learns the human authorized it. |
+| **One-shot override** | `/approval-review approve [n]` records a human authorization for one retry. Bound to the same session, tool and byte-identical arguments; expires after five minutes by default and is not restored after restart. The reviewer still decides. |
 | **Fourth access mode** | An `替我审批` ("approve for me") entry beside 仅可查看 / 工作区内修改 / 完全权限. It shares its sandbox and approval knobs with `workspace-write` on purpose — the difference is WHO answers — so the menu entry itself is the switch. `PermissionPresetService.derive()` checks the recorded selection first, which is what lets the two coexist and stay selected. |
-| **Verdict cache** | Reuses a recent verdict for a byte-identical `tool + arguments`, so a retry loop does not bill a reviewer call each time. Only consulted when `context.turns` is 0, where the verdict really is replayable from the action alone. |
+| **Verdict cache** | Disabled by default because authorization and local state can change. Explicit opt-in is limited to direct review without recent transcript. |
 | **Failure budget** | A per-turn cap on reviewer *failures*, so a broken reviewer cannot be retried without bound while the request waits. |
 | **Approvals tab** | A conversation tab rendering every request with its verdict, routing policy, risk, rationale, safer-alternative suggestion, reviewer route, timing, and the live budget/breaker state, plus working on/off and one-shot-approve buttons. |
+
+## 0.4 policy and compatibility
+
+Risk and user authorization are assessed separately. Routine low/medium risk actions normally pass. High risk requires medium/high authorization, bounded scope and no prohibition; critical risk is denied. Escalation, outside-workspace paths and normal credential authentication are not intrinsically high risk. Missing evidence, truncated action arguments, timeouts and malformed answers delegate by default.
+
+This is not a full Codex Guardian implementation. Default direct review can inspect local metadata, directory entries and text with at most four read-only calls; it delegates when evidence remains insufficient. The inspector permits workspace paths and exact outside paths named in the action, excludes credential stores, bounds reads to 16 KiB and listings to 100 entries, and never executes shell commands. Optional subagents still inherit DSH presets. The default breaker records the tool refusal, then cancels the host turn while retaining pending user input. Only host approval/request events are covered. Custom policyText replaces the semantic policy but cannot bypass the code-level critical-risk denial or high-risk authorization gate.
+
+Upgrading changes the default reviewer mode, risk ceiling, breaker action and cache setting; explicit profile overrides still win. Recorded rationale retains its original language while UI labels follow the current locale.
+
+[Policy comparison and test evidence](docs/approval-parity.md)
 
 ## Install
 
@@ -81,12 +91,13 @@ schema defaults.
 |---|---|---|
 | `enabled` | `true` | Master switch. `false` mounts the plugin but claims nothing. |
 | `enabledByDefault` | `true` | Session-start default for the runtime switch. |
-| `reviewTools` | `[bash, pwsh, write]` | Tool-name globs routed to the reviewer. |
-| `defaultPolicy` | `human` | Policy for tools matching no glob: `ai` / `human` / `never`. |
+| `reviewTools` | `['*']` | All tool approval requests by default. |
+| `defaultPolicy` | `ai` | Fallback routing policy for unmatched tools. |
 | `rules` | `[]` | Ordered `{pattern, policy, field?, note?}` regex rules, evaluated before the tool table. `field` is `reason` (default), `toolName`, or `arguments`. |
-| `reviewer.mode` | `subagent` | `subagent` forks a read-only child that can inspect the workspace; `direct` makes one plain model call. |
+| `reviewer.mode` | `direct` | Isolated model call by default: no inherited parent prompt, history, skills or memory. Optional `subagent` can inspect the workspace. |
 | `reviewer.provider` / `.model` | *(inherit)* | Reviewer route; unset inherits the calling agent's own route. |
-| `reviewer.subagentProvider` | `fork` | Subagent backend for `mode: subagent` (`fork` / `spawn`). |
+| `reviewer.subagentProvider` | `spawn` | Optional subagent backend; `spawn` omits parent history but still inherits the host preset. |
+| `reviewer.inspectLocalState` | `true` | Enable the bounded local inspector in direct mode. |
 | `reviewer.tools` | `[read, glob, grep]` | The reviewer child's tool allow-list. An empty list falls back to the read-only default rather than the parent's whole face. |
 | `reviewer.timeoutMs` | `120000` | Hard deadline for one reviewer call. A slow route plus a reasoning reviewer can take ~50s; a deadline that expires mid-review becomes a failure-policy outcome (a delegation to the human by default), not a verdict. |
 | `reviewer.maxTokens` | `1024` | Output cap. |
@@ -95,29 +106,29 @@ schema defaults.
 | `reviewer.guidance` | *(none)* | Extra deployment guidance appended after the policy. |
 | `reviewer.argumentMaxChars` | `4000` | Per-string argument cap. |
 | `reviewer.argumentsBudgetChars` | `16000` | Whole-argument-document cap; `0` disables. |
-| `context.turns` | `2` | Prior turns of transcript evidence; `0` sends none. |
+| `context.turns` | `2` | Prior turns of transcript evidence; `0` omits recent transcript; selected original/latest user intent is still supplied. |
 | `context.maxChars` | `6000` | Transcript character budget. |
 | `context.includeAssistant` | `true` | Include assistant messages in the transcript. |
 | `context.includeToolActivity` | `true` | Include tool calls and results. |
-| `maxAutoAllowRisk` | `medium` | Highest risk the reviewer may auto-allow. |
+| `maxAutoAllowRisk` | `high` | High risk also requires medium/high authorization and bounded scope; critical risk is always denied. |
 | `onRiskExceeded` | `delegate` | `allow` / `delegate` / `deny` above that ceiling. |
 | `onUncertain` | `delegate` | Reviewer reported it could not decide. |
 | `onReviewerFailure` | `delegate` | Reviewer crashed, timed out, or answered off-schema. Defaults to **delegating**: a reviewer that could not run is an infrastructure problem, not a verdict — set `rejected` for the fail-closed stance. |
 | `budget.maxReviewsPerTurn` | `20` | Reviewer calls per open turn. |
 | `budget.onExhausted` | `delegate` | `delegate` / `deny` once spent. |
 | `maxFailuresPerTurn` | `10` | Reviewer *failures* per open turn before requests delegate. |
-| `verdictCache.ttlMs` | `60000` | Reuse a verdict for an identical action; `0` disables. Only consulted when `context.turns` is 0. |
+| `verdictCache.ttlMs` | `0` | Disabled by default. Opt-in only for direct mode with context.turns=0 and inspectLocalState=false; key includes session, user evidence and model. |
 | `verdictCache.maxEntries` | `256` | Cached fingerprints before oldest-eviction. |
 | `circuitBreaker.consecutiveDenials` | `3` | Consecutive denials that trip the breaker. |
 | `circuitBreaker.windowDenials` | `10` | Denials within `windowSize` that trip it; `0` disables. |
 | `circuitBreaker.windowSize` | `50` | Rolling window size. |
-| `circuitBreaker.action` | `delegate` | `delegate` / `deny` once open. |
+| `circuitBreaker.action` | `stop` | Stop the host turn after recording the refusal; `delegate` / `deny` remain available. |
 | `override.ttlMs` | `300000` | How long an `/approval-review approve` stays usable; `0` never expires. |
 | `override.maxPending` | `10` | How many recent denials the override can address. |
 | `reasonMaxChars` | `2000` | Cap on any reason string the plugin emits. |
 | `feedReasonToModel` | `true` | Append the rationale to the refused tool result. |
 | `recordAllowedVerdicts` | `true` | Append the **allow** verdict to the accepted tool result, so the card can show why an action was allowed. Costs one short marker block in the model context per auto-allowed call. |
-| `language` | `en` | `/approval-review` output language (`en` / `zh`). |
+| `language` | `auto` | **Prose** language this plugin emits: `/approval-review` command output and the reviewer's `reason`/`suggestion` fields. `auto` follows the harness language setting (Settings → General → Language), `en`/`zh` pin it. Resolved per call, so a switch applies to the next command and the next verdict. Boundaries: the `decision`/`risk` enums stay English tokens (the parser validates them), and text already recorded in the transcript — an earlier verdict's prose, an earlier command's output — is never rewritten. |
 
 ### Tool policies
 
@@ -168,9 +179,9 @@ human prompt until a deployment decides otherwise.
   streak, cumulative counts, whether the breaker is open, how many one-shot
   overrides are pending, and the most recent decision.
 - **`approve [n]`** — records a one-shot authorization for the n-th most recent
-  denial (1 = most recent). The next review of that tool carries the human
-  authorization as reviewer context, and the reviewer still decides
-  independently.
+  denial (1 = most recent). Only the same session, tool and byte-identical
+  arguments can consume it once. It expires after five minutes by default and
+  does not survive restart. The reviewer still applies all policy prohibitions.
 
 ## The Approvals tab
 
@@ -294,18 +305,19 @@ reconstructible from the log alone.
 - **The reviewer's evidence is data, not instructions.** The transcript and the
   asker's reason can contain repository-controlled text (`AGENTS.md`, a file under
   review, command output). The data/instruction boundary is appended by code and
-  cannot be overridden by `policyText`, and an instruction — or a claim that the
-  action was already approved — inside the evidence counts AGAINST the action.
+  cannot be overridden by `policyText`. Host-labelled user intent and exact-action
+  approvals are authorization evidence; tool output cannot manufacture either.
+  Quoting malicious text for analysis is not itself an unsafe action.
 - **The reviewer is read-only.** `mode: direct` is one model call holding no
   tools; `mode: subagent` is a child with a `toolFilter` allow-list and
-  `maxDepth: 1` — the child's own delegation depth, so it may exist and may not
-  spawn a grandchild. Neither form can write, execute, or delegate, so a reviewer
+  `maxDepth: parentDepth + 1`. Configured tools are intersected with
+  read/glob/grep, so a config cannot add write or execution tools. Neither form can write, execute, or delegate, so a reviewer
   compromise cannot escalate the boundary it guards.
 - **The reviewer cannot recurse.** A reviewer child is registered as soon as it
   exists, so its own approval asks are delegated to the human chain instead of
   returning to the answerer serving it.
 - **A reviewer that cannot run asks a human.** `onReviewerFailure: delegate`,
-  `onUncertain: delegate`, and `maxAutoAllowRisk: medium` are the shipping
+  `onUncertain: delegate`, and `maxAutoAllowRisk: high` are the shipping
   choices: refusing in the model's name would make an infrastructure failure
   look like a judgement. Set `onReviewerFailure: rejected` for fail-closed, where
   refusing a safe action costs a retry while approving an unsafe one may be

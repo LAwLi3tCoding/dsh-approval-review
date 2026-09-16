@@ -16,6 +16,8 @@ import type { Session } from '@deepseek-ai/dsh-session'
 export interface PendingOverride {
   /** Tool the denial was about. */
   readonly toolName: string
+  /** Exact tool and unredacted argument digest; never a tool-wide grant. */
+  readonly fingerprint: string
   /** When the authorization was recorded. */
   readonly at: number
   /** The record id the human picked, for the card's audit trail. */
@@ -224,14 +226,14 @@ export class ReviewSessions {
    * @param limits - resolved override limits.
    * @returns the consumed authorization, or undefined.
    */
-  consumeOverride(session: Session, toolName: string, limits: GuardLimits): PendingOverride | undefined {
+  consumeOverride(session: Session, toolName: string, limits: GuardLimits, fingerprint: string): PendingOverride | undefined {
     const state = this.stateOf(session)
     const live = this.liveOverrides(session, limits)
     state.overrides.length = 0
     state.overrides.push(...live)
     for (let index = state.overrides.length - 1; index >= 0; index -= 1) {
       const candidate = state.overrides[index]!
-      if (candidate.toolName !== toolName) continue
+      if (candidate.toolName !== toolName || candidate.fingerprint !== fingerprint) continue
       state.overrides.splice(index, 1)
       return candidate
     }

@@ -19,18 +19,25 @@
  * this half reads only whole projection values. Both surfaces drive the host
  * through the slash command — the same path a human typing it would take — which
  * keeps this half free of any assumption about the host's internal services.
+ *
+ * Copy follows the HARNESS's language preference (`设置 → 通用 → 语言`) through
+ * the locale plugin's `t` seat, not the browser's `navigator.language`: the
+ * preference is the user's own setting, and a switch re-renders this tab in
+ * place. See `./locale.ts`.
  * @module dsh-approval-review/client
  */
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 // Type-only: the slot-scope augmentation that types `ctx.slots`, the session
-// standard props (`useProjection`), and the composer dock slot name.
+// standard props (`useProjection`), and the composer dock slot name; the locale
+// face type the `locale` service is read through.
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type {} from '@deepseek-ai/dsh-client-ui-slots'
+import type { LocaleFace } from '@deepseek-ai/dsh-client-ui-slots'
 import { LedgerView } from './LedgerView.tsx'
 import { installAccessModeGlyph } from './access-mode-glyph.ts'
+import { en as enCopy, LOCALE_NS, zh as zhCopy, type ApprovalReviewTranslate } from './locale.ts'
 import { directoryRoutes, reviewerRouteChoices } from './model-choices.ts'
 import { runCommandLine, type CommandRemoteFace } from './run-command.ts'
 import type { ClientAuditView } from './types.ts'
@@ -48,8 +55,33 @@ const VIEW_SLOT = 'conversation.view'
  * remote facade throws `cannot get property "remote.commands" without inject`
  * unless the key is declared here. Declaring `remote` alone is not enough, which
  * is exactly the bug this cost once.
+ *
+ * `locale` is the harness's language preference and dictionary registry. It is a
+ * hard dependency here for two reasons: this half registers its own copy into a
+ * namespace at apply time, and the tab entry declares that namespace, which the
+ * renderer refuses to assemble without an installed locale face. The conversation
+ * UI this tab lives in injects the same service, so nothing is lost by it.
  */
-export const inject = ['slots', 'remote', 'remote.commands']
+export const inject = ['slots', 'remote', 'remote.commands', 'locale']
+
+/**
+ * The locale service, read structurally.
+ *
+ * The harness's locale package owns this service and this plugin does not depend
+ * on its types, so only the two members used here are declared: `register` for
+ * this plugin's own dictionary namespace, and the render face's `bind`/revision
+ * pair. Missing means the composition is broken (the key is declared `inject`),
+ * which is reported rather than papered over with a browser-language guess.
+ */
+interface LocaleServiceFace extends LocaleFace {
+  /**
+   * Register one namespace's dictionaries.
+   * @param ns - dictionary namespace.
+   * @param dicts - locale id → that locale's entries.
+   * @returns disposer for the registration.
+   */
+  register(ns: string, dicts: Record<string, Record<string, string>>): () => void
+}
 
 /**
  * The client model directory this harness publishes for model picking.
@@ -75,11 +107,6 @@ interface SessionActionProps {
   readonly useProjection: (key: string) => unknown
   /** Current session identity, absent while no session is selected. */
   readonly sessionId?: SessionId
-}
-
-/** Whether copy should be Chinese, from the browser language. */
-function preferZh(): boolean {
-  return typeof navigator !== 'undefined' && navigator.language.toLowerCase().startsWith('zh')
 }
 
 /**
@@ -111,14 +138,18 @@ function reviewerChoices(props: SessionActionProps, current: string | undefined)
 }
 
 /** Render the full ledger tab. */
-function ApprovalReviewLedger(props: SessionActionProps & ApprovalReviewInjected): React.JSX.Element {
+function ApprovalReviewLedger(
+  props: SessionActionProps & ApprovalReviewInjected & { readonly t: ApprovalReviewTranslate },
+): React.JSX.Element {
   const view = props.useProjection('approvalReview') as ClientAuditView | undefined
   const current = view === undefined || view.reviewerModel.length === 0
     ? undefined
     : `${view.reviewerProvider.length > 0 ? `${view.reviewerProvider}/` : ''}${view.reviewerModel}`
   return LedgerView({
     view,
-    zh: preferZh(),
+    // The framework's own seat: it re-derives this function whenever the active
+    // language moves, so the ledger re-renders on a switch by identity alone.
+    t: props.t,
     runCommand: props.runCommand,
     modelChoices: reviewerChoices(props, current),
     loadModelRoutes: props.loadModelRoutes,
@@ -134,6 +165,25 @@ export function apply(ctx: ClientContext): void {
   // owns a style element, a few attributes, and one observer, all released by
   // the effect when the plugin unmounts or reloads.
   ctx.effect(() => installAccessModeGlyph(), 'approval-review: access-mode glyph')
+
+  /** The locale service, read once: `inject` guarantees it before apply runs. */
+  const localeOf = (): LocaleServiceFace => {
+    const face = (ctx as unknown as { locale?: LocaleServiceFace }).locale
+    if (face === undefined) {
+      throw new Error('approval-review: the locale service is missing, but this plugin registers its copy into it')
+    }
+    return face
+  }
+  const locale = localeOf()
+
+  // Dictionaries are a registration, so they live and die with this fiber. The
+  // renderer re-derives every declaring entry's `t` seat from (namespace,
+  // revision), which is what carries a language switch into the open tab.
+  ctx.effect(
+    () => locale.register(LOCALE_NS, { zh: zhCopy, en: enCopy }),
+    'approval-review: dictionaries',
+  )
+
   /**
    * The remote is resolved LAZILY, per call. Capturing `ctx.remote` in the
    * `apply` closure is wrong: `apply` can run before the remote facade finishes
@@ -180,7 +230,12 @@ export function apply(ctx: ClientContext): void {
       id: VIEW_SLOT_ID,
       // After the built-in 轨迹 tab so the strip keeps its familiar order.
       order: 40,
-      label: () => (preferZh() ? '审批' : 'Approvals'),
+      // A thunk re-read per render: the strip refreshes its tabs on a locale
+      // change, so the title follows the setting without re-registration.
+      label: () => locale.bind(LOCALE_NS)('tab'),
+      // Declaring the namespace puts the framework's `t` seat on the component
+      // props and subscribes this outlet to language revisions.
+      locale: LOCALE_NS,
       inject,
     },
     ApprovalReviewLedger,

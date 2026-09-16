@@ -75,6 +75,12 @@ describe('initAuditState', () => {
 })
 
 describe('applyAuditEvent', () => {
+  it('preserves the recorded timestamp across history replay', () => {
+    const asked = { ...event('approval/asked', { id: 'a', toolName: 'bash' }), time: 1720000000000 }
+    expect(fold([asked]).records[0]!.startedAt).toBe(asked.time)
+    expect(fold([asked]).records[0]!.startedAt).toBe(asked.time)
+  })
+
   it('returns the same reference for an uninteresting event', () => {
     const state = initAuditState()
     expect(applyAuditEvent(state, event('step/end', { turn: 1, step: 0 }), DEFAULTS)).toBe(state)
@@ -268,19 +274,19 @@ describe('applyAuditEvent', () => {
     expect(state.enabledOverride).toBe(false)
   })
 
-  it('counts an approve command as a pending override', () => {
+  it('does not restore ephemeral authorizations from historical commands', () => {
     const state = fold([event('command/run', { commandId: 'x', name: COMMAND_NAME, args: 'approve 1', source: 'user' })])
-    expect(state.pendingOverrides).toBe(1)
+    expect(state.pendingOverrides).toBe(0)
   })
 
-  it('consumes a pending override on the next recorded approval', () => {
+  it('does not label an unrelated later request as human-authorized', () => {
     const state = fold([
       event('command/run', { commandId: 'x', name: COMMAND_NAME, args: 'approve 1', source: 'user' }),
       event('turn/start', { turn: 1 }),
       event('approval/asked', { id: 'a', toolName: 'bash' }),
     ])
     expect(state.pendingOverrides).toBe(0)
-    expect(state.records[0]!.overridden).toBe(true)
+    expect(state.records[0]!.overridden).toBe(false)
   })
 
   it('ignores another plugin\u2019s command', () => {
@@ -447,4 +453,17 @@ describe('reviewer-model override', () => {
     const other = applyAuditEvent(set, event('command/run', { commandId: 'y', name: COMMAND_NAME, args: 'status', source: 'user' }), DEFAULTS)
     expect(other.modelOverride).toBe('m1')
   })
+})
+
+describe('authorization assessment audit', () => {
+  it('round-trips authorization separately from risk', () => {
+    const marker = formatReviewMarker({ reason: 'User requested this bounded operation', risk: 'high', userAuthorization: 'medium' })
+    expect(parseReviewMarker(marker)).toMatchObject({ risk: 'high', userAuthorization: 'medium' })
+  })
+})
+
+
+it('records an exact-action approval only when carried by its review marker', () => {
+  const parsed = parseReviewMarker(formatReviewMarker({ reason: 'exact retry', overridden: true }))
+  expect(parsed?.overridden).toBe(true)
 })

@@ -26,6 +26,7 @@ export interface ClientAuditRecord {
   readonly outcome?: ClientOutcome
   readonly reason?: string
   readonly suggestion?: string
+  readonly userAuthorization?: 'high' | 'medium' | 'low' | 'unknown'
   readonly risk?: ClientRisk
   readonly reviewerRoute?: string
   readonly durationMs?: number

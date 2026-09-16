@@ -9,6 +9,11 @@
  *
  * It reads the same `approvalReview` projection as the card, so the two can never
  * disagree, and it holds no state of its own.
+ *
+ * Copy follows the harness's own language preference through the `t` seat (see
+ * `./locale.ts`). Fields the plugin did NOT author — the reviewer's rationale,
+ * the asker's reason, the arguments preview — are printed verbatim, because they
+ * are transcript text recorded at decision time, not this tab's copy.
  * @module dsh-approval-review/client/LedgerView
  */
 
@@ -16,13 +21,18 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { ClientAuditRecord, ClientAuditView, ClientRisk } from './types.ts'
 import { resetScrollableAncestorToTop } from './scroll.ts'
 import { ModelPicker } from './ModelPicker.tsx'
+import type { ApprovalReviewTranslate } from './locale.ts'
 
 /** Props for the ledger tab. */
 export interface LedgerViewProps {
   /** The session's audit ledger, or undefined before the first frame lands. */
   readonly view: ClientAuditView | undefined
-  /** Whether to render copy in Chinese. */
-  readonly zh: boolean
+  /**
+   * Translate function for this plugin's copy, bound to the ACTIVE harness
+   * locale. The slot seat hands out a fresh reference per language revision, so
+   * a switch re-renders this tab without a subscription of our own.
+   */
+  readonly t: ApprovalReviewTranslate
   /**
    * Runs one slash command line in this session. A returned string is a failure
    * line the host refused, which the tab surfaces instead of swallowing.
@@ -64,13 +74,27 @@ function riskTone(risk: ClientRisk | undefined): string {
 }
 
 /**
+ * The risk grade as copy.
+ *
+ * The wire value is a closed ENGLISH enum (`low` …) that the reviewer reports and
+ * the projection carries; only its display follows the language, which is what
+ * keeps a Chinese row from reading "风险 low".
+ */
+function riskLabel(risk: ClientRisk, t: ApprovalReviewTranslate): string {
+  if (risk === 'low') return t('riskLow')
+  if (risk === 'medium') return t('riskMedium')
+  if (risk === 'high') return t('riskHigh')
+  return t('riskCritical')
+}
+
+/**
  * Whether the plugin was even responsible for one row, from the policy that
  * routed it. A `human` or `never` row sits on the card because the user asked
  * for a record of every approval, NOT because a reviewer judged it.
  */
-function routingTag(record: ClientAuditRecord, zh: boolean): string | undefined {
-  if (record.policy === 'never') return zh ? '硬禁用' : 'hard-disabled'
-  if (record.policy === 'human') return zh ? '交还人工' : 'delegated'
+function routingTag(record: ClientAuditRecord, t: ApprovalReviewTranslate): string | undefined {
+  if (record.policy === 'never') return t('tagHardDisabled')
+  if (record.policy === 'human') return t('tagDelegated')
   return undefined
 }
 
@@ -82,24 +106,16 @@ function routingTag(record: ClientAuditRecord, zh: boolean): string | undefined 
  * handed back to the human answerer, and an `ai` row either never reached the
  * reviewer or completed with the allow rationale left unpersisted
  * (`recordAllowedVerdicts: false`, or a value-projection accept).
+ *
+ * Only the three fallbacks are this plugin's copy; `record.reason` is the
+ * reviewer's own recorded words in whatever language it answered, and it is
+ * printed verbatim.
  */
-function rationaleText(record: ClientAuditRecord, zh: boolean): string {
+function rationaleText(record: ClientAuditRecord, t: ApprovalReviewTranslate): string {
   if (record.reason !== undefined) return record.reason
-  if (record.policy === 'never') {
-    return zh
-      ? '按 never 策略硬禁用，没有经过复核模型。'
-      : 'Hard-disabled by the never policy; no reviewer ran.'
-  }
-  if (record.policy === 'human') {
-    return zh
-      ? '已交还人工应答者，本插件没有裁决这一次。'
-      : 'Delegated to the human answerer; this plugin did not decide it.'
-  }
-  return record.refused
-    ? (zh ? '被否决，但本行没有留下理由记录。' : 'Refused, but no rationale was recorded.')
-    : (zh
-      ? '已放行；本行没有留下理由记录（该请求未走到复核模型，或核可理由未落盘）。'
-      : 'Allowed, but no rationale was recorded (the request never reached the reviewer, or its allow rationale was not persisted).')
+  if (record.policy === 'never') return t('reasonNever')
+  if (record.policy === 'human') return t('reasonHuman')
+  return record.refused ? t('reasonRefusedMissing') : t('reasonAllowedMissing')
 }
 
 
@@ -139,19 +155,19 @@ function reviewerRoutesMerge(base: readonly string[], loaded: readonly string[])
 }
 
 /** One ledger entry, expanded. */
-function Entry({ record, zh, onApprove, deniedIndex }: {
+function Entry({ record, t, onApprove, deniedIndex }: {
   record: ClientAuditRecord
-  zh: boolean
+  t: ApprovalReviewTranslate
   onApprove?: (record: ClientAuditRecord, denialIndex: number) => void
   deniedIndex: number
 }): React.JSX.Element {
   const [showArgs, setShowArgs] = useState(false)
   const pending = record.outcome === undefined
   const verdict = pending
-    ? (zh ? '进行中' : 'pending')
+    ? t('pending')
     : record.refused
-      ? (zh ? '否决' : 'refused')
-      : record.outcome === 'allowed-once' ? (zh ? '放行' : 'allowed') : (zh ? '转人工' : 'delegated')
+      ? t('refused')
+      : record.outcome === 'allowed-once' ? t('allowed') : t('delegated')
   const tone = pending ? MUTED : record.refused ? REFUSED : ALLOWED
 
   return (
@@ -168,35 +184,38 @@ function Entry({ record, zh, onApprove, deniedIndex }: {
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <span style={{ fontFamily: CODE, fontSize: 13, fontWeight: 600, color: TEXT }}>{record.toolName}</span>
         <span style={{ fontSize: 11, color: tone, border: `1px solid ${tone}`, borderRadius: 999, padding: '1px 7px' }}>{verdict}</span>
-        {routingTag(record, zh) === undefined ? null : (
+        {routingTag(record, t) === undefined ? null : (
           <span style={{ fontSize: 11, color: MUTED, border: `1px solid ${BORDER}`, borderRadius: 999, padding: '1px 7px' }}>
-            {routingTag(record, zh)}
+            {routingTag(record, t)}
           </span>
         )}
         {record.risk === undefined ? null : (
-          <span style={{ fontSize: 11, color: riskTone(record.risk) }}>{zh ? '风险' : 'risk'} {record.risk}</span>
+          <span style={{ fontSize: 11, color: riskTone(record.risk) }}>{t('risk')} {riskLabel(record.risk, t)}</span>
         )}
-        {record.overridden ? <span style={{ fontSize: 11, color: WARN }}>{zh ? '含人工一次性授权' : 'human override'}</span> : null}
+        {record.userAuthorization === undefined ? null : (
+          <span style={{ fontSize: 11, color: MUTED }}>{t('authorization')} {record.userAuthorization === 'unknown' ? t('authUnknown') : riskLabel(record.userAuthorization, t)}</span>
+        )}
+        {record.overridden ? <span style={{ fontSize: 11, color: WARN }}>{t('override')}</span> : null}
         <span style={{ marginLeft: 'auto', fontSize: 11, color: MUTED }}>
           {stamp(record.startedAt)} · T{record.turn}/S{record.step}
           {record.durationMs === undefined ? '' : ` · ${record.durationMs} ms`}
         </span>
       </div>
 
-      <Field label={zh ? '裁决理由' : 'rationale'}>
-        <span style={{ color: record.reason === undefined ? MUTED : TEXT }}>{rationaleText(record, zh)}</span>
+      <Field label={t('rationaleLabel')}>
+        <span style={{ color: record.reason === undefined ? MUTED : TEXT }}>{rationaleText(record, t)}</span>
       </Field>
 
       {record.suggestion === undefined ? null : (
-        <Field label={zh ? '更安全的做法' : 'safer path'}>{record.suggestion}</Field>
+        <Field label={t('saferPath')}>{record.suggestion}</Field>
       )}
-      <Field label={zh ? '路由策略' : 'routing'} mono>{record.policy} · {record.policySource}</Field>
+      <Field label={t('routing')} mono>{record.policy} · {record.policySource}</Field>
       {record.askReason === undefined ? null : (
-        <Field label={zh ? '申请理由' : 'asked why'}>{record.askReason}</Field>
+        <Field label={t('askedWhy')}>{record.askReason}</Field>
       )}
       {record.reviewerRoute === undefined ? null : (
-        <Field label={zh ? '复核模型' : 'reviewer'} mono>
-          {record.reviewerRoute}{record.uncertain ? ` · ${zh ? '不确定' : 'uncertain'}` : ''}
+        <Field label={t('reviewer')} mono>
+          {record.reviewerRoute}{record.uncertain ? ` · ${t('uncertain')}` : ''}
         </Field>
       )}
 
@@ -206,7 +225,7 @@ function Entry({ record, zh, onApprove, deniedIndex }: {
             type="button"
             onClick={() => setShowArgs(v => !v)}
             style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--dsw-alias-link, #58a6ff)', fontSize: 11 }}
-          >{showArgs ? (zh ? '收起参数' : 'hide arguments') : (zh ? '查看参数' : 'show arguments')}</button>
+          >{showArgs ? t('hideArgs') : t('showArgs')}</button>
           {showArgs ? (
             <pre style={{
               margin: '6px 0 0', padding: 10, borderRadius: 6, background: PANEL,
@@ -225,7 +244,7 @@ function Entry({ record, zh, onApprove, deniedIndex }: {
             alignSelf: 'flex-start', cursor: 'pointer', fontSize: 11, padding: '3px 9px',
             borderRadius: 6, border: `1px solid ${BORDER}`, background: 'transparent', color: TEXT,
           }}
-        >{zh ? `授权重试第 ${deniedIndex} 条否决` : `approve denial #${deniedIndex} for one retry`}</button>
+        >{t('approveRetry', { n: deniedIndex })}</button>
       ) : null}
     </div>
   )
@@ -253,7 +272,7 @@ function useStartAtTop(root: React.RefObject<HTMLDivElement | null>): void {
   }, [root])
 }
 
-export function LedgerView({ view, zh, runCommand, modelChoices, loadModelRoutes }: LedgerViewProps): React.JSX.Element {
+export function LedgerView({ view, t, runCommand, modelChoices, loadModelRoutes }: LedgerViewProps): React.JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null)
   useStartAtTop(rootRef)
   const [loadedChoices, setLoadedChoices] = useState<readonly string[] | undefined>(undefined)
@@ -285,28 +304,28 @@ export function LedgerView({ view, zh, runCommand, modelChoices, loadModelRoutes
   return (
     <div ref={rootRef} style={{ padding: '14px 16px', overflow: 'auto', height: '100%', fontFamily: 'inherit' }}>
       <div style={headerStyle}>
-        <strong style={{ fontSize: 14, color: TEXT }}>{zh ? '审批审计' : 'Approval audit'}</strong>
+        <strong style={{ fontSize: 14, color: TEXT }}>{t('title')}</strong>
         <span style={{ fontSize: 12, color: view?.enabled === false ? MUTED : ALLOWED }}>
-          {view === undefined ? (zh ? '尚无数据' : 'no data') : view.enabled ? (zh ? '自动审批已开启' : 'auto-approval on') : (zh ? '自动审批已关闭' : 'auto-approval off')}
+          {view === undefined ? t('noData') : view.enabled ? t('autoOn') : t('autoOff')}
         </span>
         {runCommand === undefined ? null : (
           <>
             <button type="button" disabled={view?.enabled === true} onClick={() => run('/approval-review on')}
               style={{ fontSize: 11, padding: '3px 9px', borderRadius: 6, cursor: view?.enabled === true ? 'default' : 'pointer', border: `1px solid ${BORDER}`, color: view?.enabled === true ? MUTED : TEXT, background: 'transparent' }}>
-              {zh ? '开启' : 'on'}
+              {t('enable')}
             </button>
             <button type="button" disabled={view?.enabled === false} onClick={() => run('/approval-review off')}
               style={{ fontSize: 11, padding: '3px 9px', borderRadius: 6, cursor: view?.enabled === false ? 'default' : 'pointer', border: `1px solid ${BORDER}`, color: view?.enabled === false ? MUTED : TEXT, background: 'transparent' }}>
-              {zh ? '关闭' : 'off'}
+              {t('disable')}
             </button>
           </>
         )}
         {view === undefined ? null : (
           <span style={{ fontSize: 11, color: MUTED, fontFamily: CODE }}>
-            {zh ? '复核模型 ' : 'reviewer '}
+            {`${t('reviewer')} `}
             {view.reviewerModel.length > 0
               ? `${view.reviewerProvider.length > 0 ? `${view.reviewerProvider}/` : ''}${view.reviewerModel}`
-              : (zh ? '继承会话' : 'inherit session')}
+              : t('inheritSession')}
           </span>
         )}
         {runCommand === undefined ? null : (
@@ -316,7 +335,7 @@ export function LedgerView({ view, zh, runCommand, modelChoices, loadModelRoutes
               labels={modelLabels}
               runCommand={run}
               loadModelRoutes={loadModelRoutes}
-              zh={zh}
+              t={t}
               onRoutesLoaded={({ routes, labels }) => {
                 setModelLabels(labels)
                 setLoadedChoices(routes.length === 0 ? (modelChoices ?? []) : reviewerRoutesMerge(modelChoices ?? [], routes))
@@ -326,35 +345,38 @@ export function LedgerView({ view, zh, runCommand, modelChoices, loadModelRoutes
               type="button"
               onClick={() => run('/approval-review model default')}
               style={{ fontSize: 11, padding: '3px 9px', borderRadius: 6, cursor: 'pointer', border: `1px solid ${BORDER}`, color: TEXT, background: 'transparent' }}
-            >{zh ? '继承' : 'inherit'}</button>
+            >{t('inherit')}</button>
           </span>
         )}
         {view === undefined || view.total === 0 ? null : (
           <span style={{ fontSize: 11, color: MUTED }}>
-            {zh
-              ? `共 ${view.total} 次 · 本插件裁决 ${reviewedCount} · 已否决 ${view.refused} · 本回合复审 ${view.reviewsThisTurn}/${view.maxReviewsPerTurn} · 连续否决 ${view.consecutiveDenials}`
-              : `${view.total} total · ${reviewedCount} routed to the reviewer · ${view.refused} refused · this turn ${view.reviewsThisTurn}/${view.maxReviewsPerTurn} · streak ${view.consecutiveDenials}`}
+            {t('summary', {
+              total: view.total,
+              reviewed: reviewedCount,
+              refused: view.refused,
+              turn: view.reviewsThisTurn,
+              max: view.maxReviewsPerTurn,
+              streak: view.consecutiveDenials,
+            })}
           </span>
         )}
       </div>
 
       {commandError === null ? null : (
         <div style={{ fontSize: 11, color: REFUSED, marginBottom: 8 }}>
-          {zh ? '命令被拒：' : 'command refused: '}{commandError}
+          {t('commandRefused')}{commandError}
         </div>
       )}
 
       {view?.circuitOpen === true ? (
         <div style={{ fontSize: 12, color: REFUSED, marginBottom: 10 }}>
-          {zh ? '否决熔断已触发：本回合后续请求转人工审批。' : 'Rejection breaker is open: later requests in this turn go to the human chain.'}
+          {t('breaker')}
         </div>
       ) : null}
 
       {records.length === 0 ? (
         <div style={{ fontSize: 13, color: MUTED, padding: '24px 4px', lineHeight: 1.7 }}>
-          {zh
-            ? '本会话还没有审批记录。当某个动作需要越过沙箱边界时，这里会留下完整的裁决理由、风险等级与更安全的替代做法。'
-            : 'No approvals recorded in this session yet. When an action needs to cross the sandbox boundary, its full rationale, risk grade, and safer alternative land here.'}
+          {t('empty')}
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -362,7 +384,7 @@ export function LedgerView({ view, zh, runCommand, modelChoices, loadModelRoutes
             <Entry
               key={record.reviewId}
               record={record}
-              zh={zh}
+              t={t}
               deniedIndex={deniedIndexOf(record)}
               onApprove={runCommand === undefined
                 ? undefined

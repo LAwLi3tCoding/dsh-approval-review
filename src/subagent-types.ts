@@ -55,6 +55,7 @@ export interface SubagentStartRequestSubset {
   /** Short display label persisted with the child. */
   readonly label?: string
   /** Content delivered as the child's user message. */
+  readonly persona?: string
   readonly prompt: ContentBlock[]
   /** The spawning agent; the in-process providers fork from its session. */
   readonly parent: Agent
@@ -64,7 +65,7 @@ export interface SubagentStartRequestSubset {
   readonly agentOptions?: { readonly provider?: string; readonly model?: string }
   /** Object-rooted JSON Schema for the child's structured result. */
   readonly outputSchema?: ObjectJsonSchema
-  /** Absolute delegation-depth cap; the reviewer uses 0 to stay non-delegating. */
+  /** Absolute delegation-depth cap; the reviewer uses parentDepth + 1. */
   readonly maxDepth?: number
   /** Child tool scoping, applied as a scoped restriction in the child. */
   readonly toolFilter?: { readonly allow: readonly string[] }

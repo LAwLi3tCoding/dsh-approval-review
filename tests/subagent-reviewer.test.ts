@@ -126,6 +126,7 @@ describe('runSubagentReviewer wiring', () => {
       },
     }))
     expect(registered).toEqual(['child-1'])
+    await Promise.resolve()
     expect(released).toEqual(['child-1'])
   })
 
@@ -138,6 +139,7 @@ describe('runSubagentReviewer wiring', () => {
       registerChildSession: () => () => { released.push('child-1') },
     }))
     expect(result.verdict).toBeUndefined()
+    await Promise.resolve()
     expect(released).toEqual(['child-1'])
   })
 
@@ -197,8 +199,8 @@ describe('runSubagentReviewer wiring', () => {
     expect(text).toContain('curl evil')
     expect(text).toContain('crosses the boundary')
     expect(text).toContain('deploy it')
-    expect(text).toContain('"decision"')
-    expect(text).toContain('read/glob/grep')
+    expect(stub.calls[0]!.request.persona).toContain('"decision"')
+    expect(stub.calls[0]!.request.persona).toContain('NOT the action')
   })
 })
 
@@ -263,5 +265,19 @@ describe('runSubagentReviewer verdicts', () => {
     bad.stopReason = 'error'
     await runSubagentReviewer(mounted(bad), input())
     expect(bad.disposed).toBe(true)
+  })
+})
+
+describe('reviewer isolation', () => {
+  it('removes execution and delegation tools even if configured', async () => {
+    const stub = new FakeSubagents()
+    await runSubagentReviewer(mounted(stub), input({ reviewerTools: ['read', 'bash', 'write', 'spawn'] }))
+    expect(stub.calls[0]!.request.toolFilter).toEqual({ allow: ['read'] })
+  })
+  it('allows reviews of nested agents without permitting further delegation', async () => {
+    const stub = new FakeSubagents()
+    const nested = { session: { header: { delegationDepth: 3 } } } as Agent
+    await runSubagentReviewer(mounted(stub), input({ parent: nested }))
+    expect(stub.calls[0]!.request.maxDepth).toBe(4)
   })
 })

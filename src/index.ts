@@ -38,6 +38,10 @@ import type {} from '@deepseek-ai/dsh-session-projection'
 import { Config, type Config as ConfigShape } from './config.ts'
 import { auditView } from './audit.ts'
 import { ReviewRuntime } from './runtime.ts'
+import { outputIsZh } from './output-language.ts'
+
+/** The command handler's language read; also the output-language tests' entry point. */
+export { outputIsZh }
 
 export const name = 'approval-review'
 
@@ -151,7 +155,9 @@ export function apply(ctx: Context, config: ConfigShape): void {
       const session = agent.session
       const args = invocation.rawInput.trim().toLowerCase()
       const action = args.split(/\s+/u)[0] ?? ''
-      const zh = config.language === 'zh'
+      // Resolved per invocation, not at mount: a language switch applies to the
+      // next command without a restart (see `outputIsZh`).
+      const zh = outputIsZh(ctx, config)
       switch (action) {
         case '':
         case 'status': {
@@ -209,12 +215,14 @@ export function apply(ctx: Context, config: ConfigShape): void {
           if (target.toolName === undefined) {
             return { kind: 'error' as const, text: zh ? '该记录缺少工具名，无法放行。' : 'That record has no tool name; cannot approve.' }
           }
-          runtime.recordOverride(session, { toolName: target.toolName, at: Date.now(), reviewId: target.reviewId })
+          if (!runtime.recordOverride(session, { toolName: target.toolName, at: Date.now(), reviewId: target.reviewId, ...target.callId === undefined ? {} : { callId: target.callId } })) {
+            return { kind: 'error' as const, text: zh ? '无法恢复原始操作，未记录授权。' : 'Original action unavailable; no authorization recorded.' }
+          }
           return {
             kind: 'success' as const,
             text: zh
-              ? `已记录一次性放行：下一次对 ${target.toolName} 的复审会带着这条人工授权，但复核模型仍会独立裁决。`
-              : `One-shot approval recorded for ${target.toolName}: the next review of that tool carries this human authorization, but the reviewer still decides independently.`,
+              ? `已记录一次性放行：下一次对 ${target.toolName} 相同参数的复审会带着这条人工授权，但复核模型仍会独立裁决。`
+              : `One-shot approval recorded for ${target.toolName}: the next review with byte-identical arguments carries this human authorization, but the reviewer still decides independently.`,
           }
         }
         case 'model': {

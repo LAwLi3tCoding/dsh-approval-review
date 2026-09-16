@@ -1,6 +1,6 @@
 {
   "name": "dsh-approval-review",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Codex-style agent auto-approval for DeepSeek Harness: an independent reviewer model decides allow/deny on the approval answerer chain, fail-closed, with a per-decision rationale — refusals and allows alike — in a dedicated Approvals tab. · DSH 插件：Codex 风格的 Agent 自动审批，独立 reviewer 模型裁决、fail-closed、每次审批（放行与否决）都留下详细理由，并在独立的「审批」页签中展示。",
   "type": "module",
   "main": "./lib/index.js",
@@ -20,7 +20,8 @@
     "cordis.patch.yml",
     "README.md",
     "README-zh.md",
-    "LICENSE"
+    "LICENSE",
+    "docs"
   ],
   "sideEffects": false,
   "scripts": {

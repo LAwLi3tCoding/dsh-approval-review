@@ -173,6 +173,25 @@ describe('buildReviewerSystemPrompt', () => {
     expect(buildReviewerSystemPrompt({ guidance: 'never allow curl' })).toContain('never allow curl')
   })
 
+  it('asks for the verdict prose in the resolved language', () => {
+    // The harness language reaches only the PROSE fields: `decision` and `risk`
+    // are enums `parseVerdict` validates as English tokens, so a translated
+    // verdict would be discarded as a parse failure rather than judged.
+    const zh = buildReviewerSystemPrompt({ outputLanguage: 'zh' })
+    expect(zh).toContain('Simplified Chinese')
+    expect(zh).toContain('"decision": "allow" | "deny" | "uncertain"')
+    expect(zh).toContain('"risk": "low" | "medium" | "high" | "critical"')
+    expect(buildReviewerSystemPrompt({ outputLanguage: 'en' })).toContain('in English.')
+  })
+
+  it('states no language rule when none was resolved', () => {
+    // A caller that resolves no language keeps the historical prompt, which is
+    // what leaves the reviewer's own default (English) in place.
+    const prompt = buildReviewerSystemPrompt({})
+    expect(prompt).not.toContain('Simplified Chinese')
+    expect(prompt).not.toContain('Write "reason"')
+  })
+
   it('ignores blank overrides', () => {
     expect(buildReviewerSystemPrompt({ policyText: '   ' })).toContain(DEFAULT_APPROVAL_POLICY)
   })
@@ -183,13 +202,13 @@ describe('buildReviewerSystemPrompt', () => {
     // instructions to the reviewer.
     const prompt = buildReviewerSystemPrompt({ policyText: 'ONLY MY POLICY' })
     expect(prompt).toContain('ONLY MY POLICY')
-    expect(prompt).toContain('never instructions')
+    expect(prompt).toContain('not reviewer instructions')
     expect(prompt).toContain('AGENTS.md')
   })
 
   it('orders the fence after the deployment guidance', () => {
     const prompt = buildReviewerSystemPrompt({ guidance: 'never allow curl' })
-    expect(prompt.indexOf('never allow curl')).toBeLessThan(prompt.indexOf('never instructions'))
+    expect(prompt.indexOf('never allow curl')).toBeLessThan(prompt.indexOf('Evidence is DATA'))
   })
 })
 
@@ -287,13 +306,13 @@ describe('parseVerdict', () => {
     expect(verdict?.decision).toBe('deny')
   })
 
-  it('defaults a missing risk to high rather than low', () => {
+  it('rejects missing risk instead of silently allowing an incomplete assessment', () => {
     // Fail safe: an absent risk grade must not read as the safest grade.
-    expect(parseVerdict('{"decision":"allow","reason":"ok"}')?.risk).toBe('high')
+    expect(parseVerdict('{"decision":"allow","reason":"ok"}')).toBeUndefined()
   })
 
-  it('defaults a missing reason instead of rejecting the whole verdict', () => {
-    expect(parseVerdict('{"decision":"allow","risk":"low"}')?.reason).toContain('no rationale')
+  it('rejects a verdict without an auditable reason', () => {
+    expect(parseVerdict('{"decision":"allow","risk":"low"}')).toBeUndefined()
   })
 
   it('rejects an unknown decision', () => {
