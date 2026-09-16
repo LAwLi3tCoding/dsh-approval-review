@@ -80,6 +80,19 @@ export interface ContextConfig {
   readonly includeAssistant: boolean
   /** Include tool call/result pairs in the transcript. */
   readonly includeToolActivity: boolean
+  /**
+   * Include the harness's authorization ledger in the evidence.
+   *
+   * Deliberately NOT bounded by {@link turns}: a user's explicit authorization is
+   * a durable fact, and a transcript window is exactly what aged one out of the
+   * packet in the incident this ledger exists for. Budgeted separately so the two
+   * sections cannot crowd each other out.
+   */
+  readonly includeAuthorizations: boolean
+  /** Character budget for the authorization-ledger section; 0 disables it. */
+  readonly authorizationMaxChars: number
+  /** Newest authorization facts kept; older ones are dropped, never summarized. */
+  readonly authorizationMaxEntries: number
 }
 
 /** Verdict cache settings. */
@@ -254,6 +267,16 @@ export const Config: Schema<Config> = Schema.object({
       .description('Include assistant messages in the transcript.'),
     includeToolActivity: Schema.boolean().default(true)
       .description('Include tool calls and results in the transcript.'),
+    includeAuthorizations: Schema.boolean().default(true)
+      .description('Include the harness\'s authorization ledger in the reviewer evidence: the user\'s '
+        + 'explicit `ask_user_question` selections, the user\'s own instructions, and a one-shot '
+        + '`/approve`. NOT bounded by `turns` — an authorization is a durable fact, not recent chatter, '
+        + 'and a transcript window is what aged one out of the packet.'),
+    authorizationMaxChars: Schema.number().step(1).min(0).default(2000)
+      .description('Character budget for the authorization-ledger section; 0 disables it.'),
+    authorizationMaxEntries: Schema.number().step(1).min(1).default(8)
+      .description('Newest authorization facts kept in that section; older ones are dropped, never '
+        + 'summarized, because a summarized authorization is one the reviewer would have to guess at.'),
   // @ts-expect-error Schemastery cannot express "every field has its own default",
   // so `{}` is the correct seed even though the type demands the filled shape.
   }).default({}),

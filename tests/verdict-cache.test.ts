@@ -34,6 +34,18 @@ describe('VerdictCache.fingerprint', () => {
     // "a" + \0 + "b\0c" must not collide with "a\0b" + \0 + "c".
     expect(VerdictCache.fingerprint('a', 'b\0c')).not.toBe(VerdictCache.fingerprint('a\0b', 'c'))
   })
+
+  it('separates a retry that presents an authorization from one that does not', () => {
+    // A one-shot `/approval-review approve` exists to overturn a denial. Keyed on
+    // the action alone, the authorized retry lands on the cached copy of the very
+    // denial the human just overrode — the grant would be silently ignored.
+    expect(VerdictCache.fingerprint('edit', '{"p":"a"}', 'edit#r1'))
+      .not.toBe(VerdictCache.fingerprint('edit', '{"p":"a"}'))
+  })
+
+  it('leaves the pre-authorization fingerprint unchanged, so an upgrade does not cold-start the cache', () => {
+    expect(VerdictCache.fingerprint('bash', '{"a":1}')).toBe(VerdictCache.fingerprint('bash', '{"a":1}', ''))
+  })
 })
 
 describe('VerdictCache', () => {

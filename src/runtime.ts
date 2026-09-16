@@ -17,6 +17,11 @@ import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 import type { ApprovalRequestEvent } from '@deepseek-ai/dsh-user-approval/types'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import {
+  buildAuthorizationLedger,
+  overrideEntry,
+  renderAuthorizationLedger,
+} from './authorization-ledger.ts'
+import {
   applyVerdictGates,
   resolveToolPolicy,
   type Config,
@@ -456,11 +461,22 @@ export class ReviewRuntime {
       this.config.reviewer.argumentsBudgetChars,
     )
     const transcript = this.buildTranscript(session)
+    // Not part of the transcript, and not bounded by its window: see
+    // `buildAuthorizations`.
+    const authorizations = this.buildAuthorizations(session, override)
 
     // Reuse a recent verdict for a byte-identical action. Only sound with no
     // transcript in evidence, because otherwise the verdict also depends on the
     // conversation and could not be replayed from the action alone.
-    const fingerprint = VerdictCache.fingerprint(req.toolName, rawArguments)
+    //
+    // The authorization joins that identity for the same reason in reverse: a
+    // `/approval-review approve` exists to overturn a denial, so it must not land
+    // on the cached copy of the denial it was issued against.
+    const fingerprint = VerdictCache.fingerprint(
+      req.toolName,
+      rawArguments,
+      override === undefined ? '' : `${override.toolName}#${override.reviewId ?? 'latest'}`,
+    )
     if (this.cacheUsable) {
       const cached = this.cache.get(fingerprint)
       if (cached !== undefined) {
@@ -495,6 +511,7 @@ export class ReviewRuntime {
           toolName: req.toolName,
           argumentsText,
           transcript,
+          ...authorizations.length === 0 ? {} : { authorizations },
           ...req.reason === undefined ? {} : { askReason: req.reason },
         },
         ...this.config.reviewer.policyText === undefined ? {} : { policyText: this.config.reviewer.policyText },
@@ -509,6 +526,7 @@ export class ReviewRuntime {
           toolName: req.toolName,
           argumentsText,
           transcript,
+          ...authorizations.length === 0 ? {} : { authorizations },
           ...req.reason === undefined ? {} : { askReason: req.reason },
         }),
         {
@@ -771,6 +789,53 @@ export class ReviewRuntime {
       default:
         return undefined
     }
+  }
+
+  /**
+   * Render the authorization ledger that travels beside the transcript.
+   *
+   * Two sources, newest first: what the session already recorded (the user's own
+   * instructions, and the harness's `ask_user_question` selections), plus the
+   * one-shot override THIS request presented — which exists only in memory, and
+   * which the reviewer is being asked to honour.
+   *
+   * Unlike {@link buildTranscript} this is NOT bounded by `context.turns`: the
+   * window is exactly what aged a user's explicit authorization out of the packet,
+   * after which the reviewer fell back to a stale instruction and denied an action
+   * the user had asked for. An authorization is a durable fact, so it gets its own
+   * section and its own budget instead of competing for transcript room.
+   * @param session - the session being reviewed for.
+   * @param override - the consumed one-shot authorization, when one applied.
+   * @returns the rendered section, or an empty string when none applies.
+   */
+  private buildAuthorizations(
+    session: Session,
+    override: { toolName: string; reviewId?: string } | undefined,
+  ): string {
+    if (!this.config.context.includeAuthorizations) return ''
+    const maxChars = this.config.context.authorizationMaxChars
+    if (maxChars <= 0) return ''
+    const entries = [
+      ...buildAuthorizationLedger(session, {
+        maxEntries: this.config.context.authorizationMaxEntries,
+        // One line never needs more than this to name who authorized what; the
+        // section budget bounds the list as a whole.
+        maxCharsPerEntry: 400,
+      }),
+    ]
+    if (override !== undefined) {
+      entries.unshift(overrideEntry({ toolName: override.toolName, at: Date.now() }, this.turnOf(session)))
+    }
+    return renderAuthorizationLedger(entries, maxChars)
+  }
+
+  /** Count the turns a session has opened; the ledger labels each fact with one. */
+  private turnOf(session: Session): number {
+    let turn = 0
+    for (let seq = 0; seq < session.seq; seq += 1) {
+      if (session.eventAt(seq as never)?.type === 'turn/start') turn += 1
+    }
+    return turn
   }
 }
 

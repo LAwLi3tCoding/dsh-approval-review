@@ -87,6 +87,19 @@ interface ContextConfig {
   readonly includeAssistant: boolean;
   /** Include tool call/result pairs in the transcript. */
   readonly includeToolActivity: boolean;
+  /**
+   * Include the harness's authorization ledger in the evidence.
+   *
+   * Deliberately NOT bounded by {@link turns}: a user's explicit authorization is
+   * a durable fact, and a transcript window is exactly what aged one out of the
+   * packet in the incident this ledger exists for. Budgeted separately so the two
+   * sections cannot crowd each other out.
+   */
+  readonly includeAuthorizations: boolean;
+  /** Character budget for the authorization-ledger section; 0 disables it. */
+  readonly authorizationMaxChars: number;
+  /** Newest authorization facts kept; older ones are dropped, never summarized. */
+  readonly authorizationMaxEntries: number;
 }
 /** Verdict cache settings. */
 interface VerdictCacheConfig {

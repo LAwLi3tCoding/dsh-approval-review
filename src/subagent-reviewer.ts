@@ -74,6 +74,15 @@ export interface SubagentReviewInput {
     readonly toolName: string
     readonly argumentsText: string
     readonly transcript: string
+    /**
+     * Rendered authorization ledger section, when the runtime recorded any.
+     *
+     * Declared on this input type as well as on `ReviewEvidence` because this is
+     * the subagent path's own contract: without it the ledger would reach
+     * `mode: direct` and silently vanish from `mode: subagent`, which is the
+     * shipping default.
+     */
+    readonly authorizations?: string
     readonly askReason?: string
   }
   /** Ruling policy text; the shipping policy when unset. */
@@ -143,6 +152,7 @@ export async function runSubagentReviewer(
     toolName: input.evidence.toolName,
     argumentsText: input.evidence.argumentsText,
     transcript: input.evidence.transcript,
+    ...input.evidence.authorizations === undefined ? {} : { authorizations: input.evidence.authorizations },
     ...input.evidence.askReason === undefined ? {} : { askReason: input.evidence.askReason },
   })
   const prompt: ContentBlock[] = [

@@ -52,11 +52,16 @@ export class VerdictCache {
    * their arguments are byte-identical.
    * @param toolName - the tool being reviewed.
    * @param argumentsText - the raw argument JSON.
+   * @param authorizationDigest - identity of the authorization this attempt
+   *   presents (a one-shot `/approval-review approve`, when one applied). A grant
+   *   exists to overturn a denial, so it belongs to the action's identity rather
+   *   than beside it: keyed only on `tool + arguments`, the retry that a human
+   *   just authorized would be answered from the cached copy of the denial.
    * @returns a stable hex digest.
    */
-  static fingerprint(toolName: string, argumentsText: string): string {
+  static fingerprint(toolName: string, argumentsText: string, authorizationDigest = ''): string {
     const hash = createHash('sha256')
-    for (const field of [toolName, argumentsText]) {
+    for (const field of [toolName, argumentsText, authorizationDigest]) {
       hash.update(`${Buffer.byteLength(field, 'utf8')}:`)
       hash.update(field, 'utf8')
     }

@@ -57,6 +57,15 @@
           maxChars: 6000
           includeAssistant: true
           includeToolActivity: true
+          # The authorization ledger: what the user actually authorized (their
+          # `ask_user_question` selections, their own instructions, a one-shot
+          # `/approve`). Kept OUTSIDE the `turns` window above on purpose — an
+          # authorization is a durable fact, not recent chatter, and a transcript
+          # window is what aged one out of the packet and made the reviewer
+          # refuse work the user had asked for.
+          includeAuthorizations: true
+          authorizationMaxChars: 2000
+          authorizationMaxEntries: 8
         # Risk gate: an allow verdict above this grade is not auto-allowed.
         maxAutoAllowRisk: medium
         onRiskExceeded: delegate

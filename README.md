@@ -34,6 +34,7 @@ circuit breaker stops the agent from looping on escalation attempts.
 | **One-shot override** | `/approval-review approve [n]` records a human authorization for one retry. The reviewer still decides; it just learns the human authorized it. |
 | **Fourth access mode** | An `替我审批` ("approve for me") entry beside 仅可查看 / 工作区内修改 / 完全权限. It shares its sandbox and approval knobs with `workspace-write` on purpose — the difference is WHO answers — so the menu entry itself is the switch. `PermissionPresetService.derive()` checks the recorded selection first, which is what lets the two coexist and stay selected. |
 | **Verdict cache** | Reuses a recent verdict for a byte-identical `tool + arguments`, so a retry loop does not bill a reviewer call each time. Only consulted when `context.turns` is 0, where the verdict really is replayable from the action alone. |
+| **Authorization ledger** | The evidence carries a section for what the user actually authorized — the harness's `ask_user_question` selections, the user's own instructions, and a one-shot `/approve` — deliberately **not** bounded by `context.turns`. A transcript window is what aged a user's explicit authorization out of the packet; the reviewer then fell back to a stale instruction and refused work the user had asked for. The prompt also grades the ACTION's blast radius rather than the sandbox mode it needed, and a grant joins the verdict-cache identity so an authorized retry is never answered from the denial it overrode. |
 | **Failure budget** | A per-turn cap on reviewer *failures*, so a broken reviewer cannot be retried without bound while the request waits. |
 | **Approvals tab** | A conversation tab rendering every request with its verdict, routing policy, risk, rationale, safer-alternative suggestion, reviewer route, timing, and the live budget/breaker state, plus working on/off and one-shot-approve buttons. |
 
@@ -99,6 +100,9 @@ schema defaults.
 | `context.maxChars` | `6000` | Transcript character budget. |
 | `context.includeAssistant` | `true` | Include assistant messages in the transcript. |
 | `context.includeToolActivity` | `true` | Include tool calls and results. |
+| `context.includeAuthorizations` | `true` | Include the authorization ledger: the user's explicit `ask_user_question` selections, the user's own instructions, and a one-shot `/approve`. **Not** bounded by `context.turns` — an authorization is a durable fact, not recent chatter. |
+| `context.authorizationMaxChars` | `2000` | Character budget for that section; `0` disables it. |
+| `context.authorizationMaxEntries` | `8` | Newest authorization facts kept. |
 | `maxAutoAllowRisk` | `medium` | Highest risk the reviewer may auto-allow. |
 | `onRiskExceeded` | `delegate` | `allow` / `delegate` / `deny` above that ceiling. |
 | `onUncertain` | `delegate` | Reviewer reported it could not decide. |

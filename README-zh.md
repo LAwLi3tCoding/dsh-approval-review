@@ -22,6 +22,7 @@
 | **一次性放行** | `/approval-review approve [n]` 为人工作一次重试授权。复核者仍独立裁决，只是会看到这条人工授权。 |
 | **访问模式第四项** | 在 仅可查看 / 工作区内修改 / 完全权限 旁边多一个「替我审批」。它和「工作区内修改」共享同一套沙箱与审批 knobs，差别只在**谁来裁决**——所以菜单项本身就是开关，选中它插件才接管。靠 `PermissionPresetService.derive()` 先认记录选中项这一点，两者可并存且保持选中。该菜单项的**盾牌+眼睛图标**由插件自己补上，见下。 |
 | **裁决缓存** | 相同的 `tool + arguments` 复用近期裁决，重试循环不会每次都烧一次复核调用。仅在 `context.turns` 为 0 时启用——那时裁决才真正可从动作本身重放。 |
+| **授权账本** | 证据里多一小节，专记「用户到底授权了什么」：harness 记录的 `ask_user_question` 选择、用户自己的指令、一次性 `/approve`，而且**不受** `context.turns` 窗口限制。真实事故里正是这个窗口把用户的显式授权挤出了证据包，复核者于是退回一条过期指令，否决了用户明确要求做的事。策略同时改为按**动作作用域**判风险，而不是按它需要哪种沙箱模式；人工授权也进入裁决缓存的指纹，授权后的重试不会再命中它要推翻的那次否决。 |
 | **失败预算** | 每回合复核**失败**次数上限，避免复核持续崩溃时无限重试、把请求卡住。 |
 | **复核者自身不可被诱导、不可递归** | 证据包被显式标注为**数据而非指令**，且这条规则由代码追加、无法被 `policyText` 覆盖；复核子代理一建立就被登记为"复核者会话"，它自己发出的审批请求一律交还人工链，不会递归回它正在服务的应答者。 |
 | **审批页签** | 会话视图里的整页账本，逐条展示工具、裁决、风险等级、理由、更安全的替代建议、**路由策略**、复核路由、耗时，以及实时的预算与熔断状态，并带真正可用的开/关与一次性放行按钮。 |
@@ -79,6 +80,9 @@ dsh --profile <profile> --dump-config | grep -A6 'id: approval-review'
 | `context.maxChars` | `6000` | 证据片段字符预算。 |
 | `context.includeAssistant` | `true` | 是否包含助手消息。 |
 | `context.includeToolActivity` | `true` | 是否包含工具调用与结果。 |
+| `context.includeAuthorizations` | `true` | 是否把「授权账本」放进证据：用户的 `ask_user_question` 显式选择、用户自己的指令、一次性 `/approve`。**不受** `context.turns` 限制——授权是长期事实，不是近期闲聊。 |
+| `context.authorizationMaxChars` | `2000` | 该小节的字符预算；`0` 关闭。 |
+| `context.authorizationMaxEntries` | `8` | 保留的最近授权条数。 |
 | `maxAutoAllowRisk` | `medium` | 允许复核者自动放行的最高风险。 |
 | `onRiskExceeded` | `delegate` | 超过该上限时：`allow` / `delegate` / `deny`。 |
 | `onUncertain` | `delegate` | 复核者表示无法判断时。 |
