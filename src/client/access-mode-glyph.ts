@@ -80,7 +80,17 @@ const TARGET_SELECTOR = [
   `[${MARK_ATTRIBUTE}]`,
 ].join(', ')
 
-/** Build the stylesheet that draws the mark on a decorated button. */
+/**
+ * Build the stylesheet that draws the mark on a decorated button.
+ *
+ * The colour is not cosmetic guesswork: the built-in glyphs sit inside the
+ * menu's `.itemIcon` span, which the design system tints
+ * `--dsw-alias-label-tertiary`, while the button itself is
+ * `--dsw-alias-label-primary` (brighter, and brighter still on the selected
+ * row). A `::before` on the button therefore inherits the WRONG one, which is
+ * why the mark looked white next to three grey shields. The trigger has no such
+ * span — its built-in icon inherits the button — so it keeps `currentColor`.
+ */
 function stylesheet(): string {
   const mask = `url("data:image/svg+xml,${encodeURIComponent(GLYPH_SVG)}")`
   return `
@@ -100,12 +110,21 @@ function stylesheet(): string {
   -webkit-mask-size:contain;
   mask-size:contain;
 }
-/* The composer trigger sizes its icons at 14px. */
+/* A menu row's icon slot is tinted tertiary; match it instead of the button. */
+button[role="menuitem"][${MARK_ATTRIBUTE}]::before{
+  background-color:var(--dsw-alias-label-tertiary, currentColor);
+}
+/* The composer trigger sizes its icons at 14px and lets them inherit. */
 button[aria-label][${MARK_ATTRIBUTE}]::before{
   width:14px;
   height:14px;
 }
 `
+}
+
+/** Exported for tests: the exact stylesheet the shim installs. */
+export function __stylesheetForTest(): string {
+  return stylesheet()
 }
 
 /**

@@ -44,3 +44,16 @@ describe('accessModeGlyphDecision', () => {
     expect(accessModeGlyphDecision({ ariaLabel: null, role: null, text: '' })).toBe('skip')
   })
 })
+
+describe('the mark follows the design system colours', () => {
+  it('is exported stylesheet text and tints menu rows like the built-in icon slot', async () => {
+    // The built-in glyphs live in `.itemIcon`, tinted `--dsw-alias-label-tertiary`,
+    // while the button itself is `label-primary`. A `::before` on the button
+    // therefore needs the explicit token or it reads as a brighter icon.
+    const module = await import('../src/client/access-mode-glyph.ts')
+    const css = (module as unknown as { __stylesheetForTest?: () => string }).__stylesheetForTest?.()
+    expect(css).toBeDefined()
+    expect(css).toContain('button[role="menuitem"][data-dsh-approval-review-glyph]::before')
+    expect(css).toContain('--dsw-alias-label-tertiary')
+  })
+})
