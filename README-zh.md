@@ -68,7 +68,7 @@ dsh --profile <profile> --dump-config | grep -A6 'id: approval-review'
 | `reviewer.provider` / `.model` | *(继承)* | 复核路由；不填则继承调用 Agent 自己的路由。会话内可用 `/approval-review model [<provider>/]<id>` 覆盖（**「审批」页签右上角可以直接选**：点开即列出本机配置的模型，候选来自客户端自己的模型目录服务 `modelDirectories`——和 `/model` 选择器、输入框里的模型座位读的是同一份目录。列表由插件自己渲染（原生 `datalist`/`select` 的弹层字号字重无法用 CSS 控制，会显得比页面吵），支持输入过滤、方向键+回车，也可以手打目录里没有的 id）。 |
 | `reviewer.subagentProvider` | `fork` | `mode: subagent` 用的子代理后端（`fork` / `spawn`）。 |
 | `reviewer.tools` | `[read, glob, grep]` | 复核子代理的工具白名单。留空会回退到只读默认，而不是继承父代理的全部工具。 |
-| `reviewer.timeoutMs` | `60000` | 单次复核的硬超时。 |
+| `reviewer.timeoutMs` | `120000` | 单次复核的硬超时。慢路由 + 推理型复核者实测要 ~50 秒；超时不是「否决」，而是按失败策略走 fail-closed。 |
 | `reviewer.maxTokens` | `1024` | 输出上限。 |
 | `reviewer.temperature` | `0` | 采样温度。 |
 | `reviewer.policyText` | *(内置策略)* | 替换裁决策略正文。 |

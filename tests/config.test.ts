@@ -188,7 +188,7 @@ describe('Config schema', () => {
     expect(resolved.reviewTools).toEqual(['bash', 'pwsh', 'write'])
     expect(resolved.defaultPolicy).toBe('human')
     expect(resolved.rules).toEqual([])
-    expect(resolved.reviewer.timeoutMs).toBe(60000)
+    expect(resolved.reviewer.timeoutMs).toBe(120000)
     expect(resolved.reviewer.maxTokens).toBe(1024)
     expect(resolved.reviewer.temperature).toBe(0)
     expect(resolved.reviewer.argumentMaxChars).toBe(4000)
@@ -215,7 +215,7 @@ describe('Config schema', () => {
   it('keeps a nested override instead of discarding sibling defaults', () => {
     const resolved = config({ reviewer: { model: 'reviewer-x' } })
     expect(resolved.reviewer.model).toBe('reviewer-x')
-    expect(resolved.reviewer.timeoutMs).toBe(60000)
+    expect(resolved.reviewer.timeoutMs).toBe(120000)
   })
 
   it('rejects an unknown enum value loudly', () => {

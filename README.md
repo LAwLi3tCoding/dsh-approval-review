@@ -88,7 +88,7 @@ schema defaults.
 | `reviewer.provider` / `.model` | *(inherit)* | Reviewer route; unset inherits the calling agent's own route. |
 | `reviewer.subagentProvider` | `fork` | Subagent backend for `mode: subagent` (`fork` / `spawn`). |
 | `reviewer.tools` | `[read, glob, grep]` | The reviewer child's tool allow-list. An empty list falls back to the read-only default rather than the parent's whole face. |
-| `reviewer.timeoutMs` | `60000` | Hard deadline for one reviewer call. |
+| `reviewer.timeoutMs` | `120000` | Hard deadline for one reviewer call. A slow route plus a reasoning reviewer can take ~50s; a deadline that expires mid-review becomes a fail-closed refusal, not a verdict. |
 | `reviewer.maxTokens` | `1024` | Output cap. |
 | `reviewer.temperature` | `0` | Sampling temperature. |
 | `reviewer.policyText` | *(shipping policy)* | Replaces the ruling policy text. |

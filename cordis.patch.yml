@@ -35,7 +35,10 @@
         # Reviewer model, prompt, and size limits. `provider`/`model` unset means
         # the reviewer inherits the calling agent's own route.
         reviewer:
-          timeoutMs: 60000
+          # 120s, not 60s: a reasoning reviewer on a slower route measured 52.5s
+          # here, and a deadline that expires mid-review is not a "no" — it is a
+          # fail-closed refusal under the default `onReviewerFailure: rejected`.
+          timeoutMs: 120000
           maxTokens: 1024
           temperature: 0
           argumentMaxChars: 4000

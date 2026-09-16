@@ -225,8 +225,10 @@ export const Config: Schema<Config> = Schema.object({
       'The reviewer child\'s tool allow-list. An empty list falls back to the read-only default '
       + 'rather than the parent\'s whole face.',
     ),
-    timeoutMs: Schema.number().step(1).min(1000).default(60000)
-      .description('Hard deadline for one reviewer call.'),
+    timeoutMs: Schema.number().step(1).min(1000).default(120000)
+      .description('Hard deadline for one reviewer call. A reasoning reviewer on a slow '
+        + 'route can take tens of seconds; a deadline that is too tight turns into a '
+        + 'fail-closed refusal (the default failure policy) rather than a verdict.'),
     maxTokens: Schema.number().step(1).min(64).default(1024)
       .description('Output-token cap for one reviewer call (`mode: direct`).'),
     temperature: Schema.number().min(0).max(2).default(0)
