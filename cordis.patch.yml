@@ -44,7 +44,7 @@
           # here, and a deadline that expires mid-review is not a "no" — it is a
           # human handoff under the default `onReviewerFailure: delegate`.
           timeoutMs: 120000
-          maxTokens: 1024
+          # maxTokens: omit to use the reviewer model route default
           temperature: 0
           argumentMaxChars: 4000
           argumentsBudgetChars: 16000

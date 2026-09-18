@@ -80,7 +80,7 @@ dsh --profile <profile> --dump-config | grep -A6 'id: approval-review'
 | `reviewer.inspectLocalState` | `true` | 为 direct 模式启用受限本地只读检查。 |
 | `reviewer.tools` | `[read, glob, grep]` | 复核子代理的工具白名单。留空会回退到只读默认，而不是继承父代理的全部工具。 |
 | `reviewer.timeoutMs` | `120000` | 单次复核的硬超时。慢路由 + 推理型复核者实测要 ~50 秒；超时不是「否决」，而是按失败策略处理——出厂设置是转回人工链。 |
-| `reviewer.maxTokens` | `1024` | 输出上限。 |
+| `reviewer.maxTokens` | 模型路由默认值 | 可选输出上限；默认不覆盖适配器或模型配置。 |
 | `reviewer.temperature` | `0` | 采样温度。 |
 | `reviewer.policyText` | *(内置策略)* | 替换裁决策略正文。 |
 | `reviewer.guidance` | *(无)* | 追加在策略之后的部署专属指引。 |

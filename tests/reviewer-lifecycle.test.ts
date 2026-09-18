@@ -10,25 +10,60 @@ const message = buildReviewerUserMessage(evidence)
 const limits = { maxTokens: 256, temperature: 0, timeoutMs: 20 }
 
 describe('bounded reviewer lifecycle', () => {
+  it.each([undefined, 8192])('only overrides the model output limit when explicitly configured (%s)', async maxTokens => {
+    const requests: Array<Record<string, unknown>> = []
+    const ctx = { llm: { stream: async function* (options: Record<string, unknown>) {
+      requests.push(options)
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '{"decision":"allow","risk":"low","reason":"routine"}' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } } } as unknown as Context
+    await runReviewerCall(ctx, { provider: 'test', model: 'test' }, 'policy', message, {
+      temperature: 0, timeoutMs: 1000, ...(maxTokens === undefined ? {} : { maxTokens }),
+    })
+    expect(requests[0]!.maxTokens).toBe(maxTokens)
+    expect(Object.hasOwn(requests[0]!, 'maxTokens')).toBe(maxTokens !== undefined)
+  })
+
+  it('rejects a truncated answer even when its partial JSON looks valid', async () => {
+    const ctx = { llm: { stream: async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '{"decision":"allow","risk":"low","reason":"routine"}' } }
+      yield { type: 'finish', reason: { kind: 'max-tokens' } }
+    } } } as unknown as Context
+    const result = await runReviewerCall(ctx, { provider: 'test', model: 'test' }, 'policy', message, limits)
+    expect(result.verdict).toBeUndefined()
+    expect(result.failure).toContain('output-token cap')
+  })
+
   it('feeds inspection evidence back to the isolated model before deciding', async () => {
     const requests: Array<{ messages: unknown; tools?: unknown }> = []
+    const replayState = {
+      response: { kind: 'pi-ai', version: 2, api: 'openai-responses', provider: 'test', model: 'test', stopReason: 'toolUse' },
+      blocks: [{ type: 'reasoning', thinkingSignature: 'synthetic-signature' }, { type: 'tool-call' }],
+    }
     let inspected = ''
     const ctx = { llm: { stream: async function* (options: { messages: unknown; tools?: unknown }) {
       requests.push(options)
       if (requests.length === 1) {
-        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
-        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'inspect-1', name: 'inspect_path', arguments: '{"path":"probe.sh","mode":"read"}' } }
+        yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+        yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'Inspect the script before deciding.' } }
+        yield { type: 'block-start', index: 1, blockType: 'tool-call' }
+        yield { type: 'block-end', index: 1, block: { type: 'tool-call', id: 'inspect-1', name: 'inspect_path', arguments: '{"path":"probe.sh","mode":"read"}' } }
       } else {
         yield { type: 'block-start', index: 0, blockType: 'text' }
         yield { type: 'block-end', index: 0, block: { type: 'text', text: '{"decision":"allow","risk":"low","reason":"verified bounded script"}' } }
       }
-      yield { type: 'finish', reason: { kind: 'stop' } }
+      yield { type: 'finish', reason: { kind: 'stop' }, ...(requests.length === 1 ? { replayState } : {}) }
     } } } as unknown as Context
     const result = await runReviewerCall(ctx, { provider: 'test', model: 'test' }, 'isolated policy', message, {
       ...limits, timeoutMs: 1000, inspect: async args => { inspected = args; return 'verified-probe-content' },
     })
     expect(JSON.parse(inspected).path).toBe('probe.sh')
     expect(requests).toHaveLength(2)
+    expect(requests[1]!.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: expect.objectContaining({ provider: 'test', model: 'test', replayState }) }),
+    ]))
     expect(JSON.stringify(requests[1]!.messages)).toContain('verified-probe-content')
     expect(result.verdict?.decision).toBe('allow')
   })

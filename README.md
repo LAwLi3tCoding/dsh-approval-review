@@ -100,7 +100,7 @@ schema defaults.
 | `reviewer.inspectLocalState` | `true` | Enable the bounded local inspector in direct mode. |
 | `reviewer.tools` | `[read, glob, grep]` | The reviewer child's tool allow-list. An empty list falls back to the read-only default rather than the parent's whole face. |
 | `reviewer.timeoutMs` | `120000` | Hard deadline for one reviewer call. A slow route plus a reasoning reviewer can take ~50s; a deadline that expires mid-review becomes a failure-policy outcome (a delegation to the human by default), not a verdict. |
-| `reviewer.maxTokens` | `1024` | Output cap. |
+| `reviewer.maxTokens` | *(model route default)* | Optional output cap; omitted by default so the adapter/model configuration applies. |
 | `reviewer.temperature` | `0` | Sampling temperature. |
 | `reviewer.policyText` | *(shipping policy)* | Replaces the ruling policy text. |
 | `reviewer.guidance` | *(none)* | Extra deployment guidance appended after the policy. |

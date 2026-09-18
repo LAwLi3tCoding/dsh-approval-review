@@ -204,7 +204,7 @@ describe('Config schema', () => {
     expect(resolved.defaultPolicy).toBe('ai')
     expect(resolved.rules).toEqual([])
     expect(resolved.reviewer.timeoutMs).toBe(120000)
-    expect(resolved.reviewer.maxTokens).toBe(1024)
+    expect(resolved.reviewer.maxTokens).toBeUndefined()
     expect(resolved.reviewer.temperature).toBe(0)
     expect(resolved.reviewer.argumentMaxChars).toBe(4000)
     expect(resolved.reviewer.argumentsBudgetChars).toBe(16000)

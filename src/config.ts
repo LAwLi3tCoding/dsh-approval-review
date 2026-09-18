@@ -58,8 +58,8 @@ export interface ReviewerConfig {
   readonly tools: string[]
   /** Hard deadline for one reviewer call. */
   readonly timeoutMs: number
-  /** Output-token cap for one reviewer call. */
-  readonly maxTokens: number
+  /** Optional output-token cap; omission uses the adapter/model route default. */
+  readonly maxTokens?: number
   /** Sampling temperature; the reviewer should be near-deterministic. */
   readonly temperature: number
   /** Ruling policy appended to the reviewer prompt (Codex-style policy text). */
@@ -247,8 +247,8 @@ export const Config: Schema<Config> = Schema.object({
       .description('Hard deadline for one reviewer call. A reasoning reviewer on a slow '
         + 'route can take tens of seconds; a deadline that is too tight turns into a '
         + 'fail-closed refusal (the default failure policy) rather than a verdict.'),
-    maxTokens: Schema.number().step(1).min(64).default(1024)
-      .description('Output-token cap for one reviewer call (`mode: direct`).'),
+    maxTokens: Schema.number().step(1).min(64)
+      .description('Optional output-token cap for direct review; omit to use the adapter/model route default.'),
     temperature: Schema.number().min(0).max(2).default(0)
       .description('Sampling temperature; 0 keeps the reviewer near-deterministic.'),
     policyText: Schema.string().description('Ruling policy appended to the reviewer prompt.'),

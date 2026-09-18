@@ -554,7 +554,7 @@ export async function runReviewerCall(
   system: string,
   message: Message,
   limits: {
-    readonly maxTokens: number
+    readonly maxTokens?: number
     readonly temperature: number
     readonly timeoutMs: number
     readonly signal?: AbortSignal
@@ -589,7 +589,8 @@ export async function runReviewerCall(
         const assembler = new BlockAssembler()
         const options: GenerateOptions = {
           provider: route.provider, model: route.model, messages: [...messages], system,
-          temperature: limits.temperature, maxTokens: limits.maxTokens, signal: controller.signal,
+          temperature: limits.temperature, signal: controller.signal,
+          ...limits.maxTokens === undefined ? {} : { maxTokens: limits.maxTokens },
           ...limits.inspect === undefined ? {} : { tools: [INSPECTION_TOOL] },
           ...limits.sessionId === undefined ? {} : { sessionId: limits.sessionId as GenerateOptions['sessionId'] },
         }
@@ -599,7 +600,15 @@ export async function runReviewerCall(
         if (calls.length === 0) return assembler
         if (assembler.finish.kind === 'max-tokens' || assembler.finish.kind === 'error' || assembler.finish.kind === 'aborted') return assembler
         if (limits.inspect === undefined || inspections + calls.length > 4) throw new Error('read-only investigation budget exhausted')
-        messages.push(createAssistantMessage({ content: blocks, source: { provider: route.provider, model: route.model } }))
+        const replayState = assembler.replayState
+        messages.push(createAssistantMessage({
+          content: blocks,
+          source: {
+            provider: route.provider,
+            model: route.model,
+            ...replayState === undefined ? {} : { replayState },
+          },
+        }))
         for (const call of calls) {
           if (controller.signal.aborted) throw new Error('review cancelled')
           inspections += 1

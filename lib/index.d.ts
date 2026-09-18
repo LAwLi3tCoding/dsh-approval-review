@@ -67,8 +67,8 @@ interface ReviewerConfig {
   readonly tools: string[];
   /** Hard deadline for one reviewer call. */
   readonly timeoutMs: number;
-  /** Output-token cap for one reviewer call. */
-  readonly maxTokens: number;
+  /** Optional output-token cap; omission uses the adapter/model route default. */
+  readonly maxTokens?: number;
   /** Sampling temperature; the reviewer should be near-deterministic. */
   readonly temperature: number;
   /** Ruling policy appended to the reviewer prompt (Codex-style policy text). */

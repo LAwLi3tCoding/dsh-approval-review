@@ -555,7 +555,7 @@ export class ReviewRuntime {
           ...req.reason === undefined ? {} : { askReason: req.reason },
         }),
         {
-          maxTokens: this.config.reviewer.maxTokens,
+          ...this.config.reviewer.maxTokens === undefined ? {} : { maxTokens: this.config.reviewer.maxTokens },
           temperature: this.config.reviewer.temperature,
           timeoutMs: this.config.reviewer.timeoutMs,
           ...req.signal === undefined ? {} : { signal: req.signal },
