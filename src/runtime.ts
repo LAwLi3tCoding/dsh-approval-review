@@ -49,8 +49,11 @@ import type { ReviewVerdict, ToolPolicy } from './review-types.ts'
 import { ReviewSessions, type GuardLimits } from './review-session.ts'
 import { VerdictCache } from './verdict-cache.ts'
 import { runSubagentReviewer } from './subagent-reviewer.ts'
+import { runJevReviewer } from './jev-reviewer.ts'
 import { createInspector } from './inspection.ts'
 import { resolveOutputLanguage } from './output-language.ts'
+import { effectiveReviewerModel, JEV_ROUTE_PROVIDER, type ReviewerEngineName, type ReviewerIdentity } from './model-override.ts'
+import { readCredentialSeam, resolveJevApiKey, type JevKeyResolution } from './jev-key.ts'
 
 /** A refusal this plugin resolved, awaiting delivery into the refused tool result. */
 export interface Refusal {
@@ -130,39 +133,150 @@ export class ReviewRuntime {
     this.cache = new VerdictCache(config.verdictCache.ttlMs, config.verdictCache.maxEntries)
   }
 
-  /** Whether the cache may be consulted: no transcript means the verdict is replayable. */
+  /**
+   * Whether a verdict is replayable from the action's own bytes.
+   *
+   * The Jev engine never inspects local state (one HTTP call, no tools), so it
+   * qualifies regardless of the `mode` / `inspectLocalState` keys — both of
+   * which belong to the LLM engine. Without this branch, enabling the cache on a
+   * Jev deployment would silently never reuse anything, because
+   * `inspectLocalState` defaults to true.
+   */
+  private verdictReplayableFor(engine: ReviewerEngineName): boolean {
+    if (engine === 'jev') return true
+    return this.config.reviewer.mode === 'direct' && !this.config.reviewer.inspectLocalState
+  }
+
+  /**
+   * Whether the cache may be consulted for one session's engine: no transcript
+   * means the verdict is replayable, and a Jev verdict always is.
+   * @param engine - the engine that will answer this session.
+   * @returns true when a cached verdict may be reused.
+   */
+  private cacheUsableFor(engine: ReviewerEngineName): boolean {
+    return this.config.context.turns === 0 && this.verdictReplayableFor(engine) && this.cache.enabled
+  }
+
+  /** Cache usability under the DEPLOYMENT engine, for the status report. */
   private get cacheUsable(): boolean {
-    return this.config.context.turns === 0 && this.config.reviewer.mode === 'direct' && !this.config.reviewer.inspectLocalState && this.cache.enabled
+    return this.cacheUsableFor(this.config.reviewer.engine)
+  }
+
+  /**
+   * The reviewer identity in force for one session.
+   *
+   * One place decides how a recorded override meets the engine in force; see
+   * `model-override.ts` for why an LLM-shaped override must not be forwarded to
+   * Jev. Everything that needs the effective model — routing, the audit marker,
+   * the card — reads it from here.
+   * @param session - the session being reviewed for.
+   * @returns the provider label, the model id, and any discarded override.
+   */
+  reviewerIdentityFor(session: Session): ReviewerIdentity {
+    const state = this.auditStates.get(session)
+    return effectiveReviewerModel({
+      engine: this.config.reviewer.engine,
+      ...state?.engineOverride === undefined ? {} : { overrideEngine: state.engineOverride },
+      ...state?.providerOverride === undefined ? {} : { overrideProvider: state.providerOverride },
+      ...state?.modelOverride === undefined ? {} : { overrideModel: state.modelOverride },
+      defaultProvider: this.reviewerProviderLabel,
+      defaultModel: this.reviewerModelLabel,
+      jevPermitted: this.config.reviewer.jev.allowEgress,
+    })
   }
 
   /**
    * The reviewer model actually in force for one session: the durable
-   * `/approval-review model <id>` override when set, else the deployment default.
+   * `/approval-review model <id>` override when it fits the engine, else the
+   * deployment default.
    * @param session - the session being reviewed for.
    * @returns the model id, or undefined to inherit the session's own model.
    */
   reviewerModelFor(session: Session): string | undefined {
-    const override = this.auditStates.get(session)?.modelOverride
-    const chosen = override ?? this.config.reviewer.model
-    return chosen === undefined || chosen.length === 0 ? undefined : chosen
+    const model = this.reviewerIdentityFor(session).model
+    return model.length === 0 ? undefined : model
   }
 
   /**
-   * The reviewer provider in force for one session: the session override when
-   * set, else the deployment config, else `undefined` so the reviewer child
-   * inherits the calling agent's provider.
+   * The reviewer provider in force for one session. Only the LLM engine routes by
+   * provider; the Jev engine's route is synthesized from its endpoint.
    * @param session - the session being reviewed for.
    * @returns the provider id, or undefined to inherit.
    */
   reviewerProviderFor(session: Session): string | undefined {
-    const override = this.auditStates.get(session)?.providerOverride
-    const chosen = override ?? this.config.reviewer.provider
-    return chosen === undefined || chosen.length === 0 ? undefined : chosen
+    if (this.config.reviewer.engine === 'jev') return undefined
+    const provider = this.reviewerIdentityFor(session).provider
+    return provider.length === 0 ? undefined : provider
+  }
+
+  /**
+   * The Jev model in force for one session.
+   * @param session - the session being reviewed for.
+   * @returns the Jev model name or alias to send.
+   */
+  jevModelFor(session: Session): string {
+    return this.reviewerIdentityFor(session).model
+  }
+
+  /**
+   * Resolve the Jev API key for one review.
+   *
+   * The credential seam comes first so that a key stored through DSH's own
+   * credential UI — or in `$DSH_HOME/.env`, or exported before launch — works for
+   * every installer, and rotation applies to the next verdict without a restart.
+   * Reading `process.env` directly stays as the fallback for a deployment that
+   * does not mount the credentials row.
+   * @returns the key and its provenance; never throws.
+   */
+  private async resolveJevKey(): Promise<JevKeyResolution> {
+    return await resolveJevApiKey({
+      envName: this.config.reviewer.jev.apiKeyEnv,
+      seam: readCredentialSeam(this.ctx.get('credentials')),
+      env: process.env,
+    })
+  }
+
+  /** Provider half of the reviewer route the card and status report show. */
+  private get reviewerProviderLabel(): string {
+    return this.config.reviewer.engine === 'jev' ? 'typesafe' : this.config.reviewer.provider ?? ''
+  }
+
+  /** Model half of the reviewer route the card and status report show. */
+  private get reviewerModelLabel(): string {
+    return this.config.reviewer.engine === 'jev' ? this.config.reviewer.jev.model : this.config.reviewer.model ?? ''
   }
 
   /** Reviewer failures recorded in the open turn, for the status report. */
   failuresThisTurn(session: Session): number {
     return this.sessions.failuresThisTurn(session)
+  }
+
+  /**
+   * Why requests were handed to the human chain in the open turn, most frequent
+   * first, for the status report.
+   * @param session - the session to report on.
+   * @returns one `code×count` label per distinct reason.
+   */
+  delegationsThisTurn(session: Session): readonly string[] {
+    return this.sessions.delegations(session)
+  }
+
+  /**
+   * Hand one request to the rest of the answerer chain, recording WHY.
+   *
+   * A ledger row that carries no rationale means "this plugin did not decide", and
+   * the reason matters: `no-call-id` means the action could not be read at all
+   * (the request event carries no arguments), while `access-mode` means the
+   * operator's own switch kept the plugin out. Counting them makes
+   * `/approval-review status` the answer instead of a guess.
+   * @param session - the requesting session.
+   * @param code - short machine-readable reason code.
+   * @param next - the rest of the chain.
+   * @returns the chain's own outcome.
+   */
+  private async handOff(session: Session, code: string, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> {
+    this.sessions.noteDelegation(session, code)
+    return await next()
   }
 
   /** Cache statistics for the status report. */
@@ -236,8 +350,10 @@ export class ReviewRuntime {
       enabledByDefault: this.config.enabledByDefault,
       maxReviewsPerTurn: this.config.budget.maxReviewsPerTurn,
       breakerTrips: state => breaker(state.denialsStreak, state.window),
-      defaultReviewerModel: this.config.reviewer.model ?? '',
-      defaultReviewerProvider: this.config.reviewer.provider ?? '',
+      defaultReviewerModel: this.reviewerModelLabel,
+      defaultReviewerProvider: this.reviewerProviderLabel,
+      defaultReviewerEngine: this.config.reviewer.engine,
+      defaultJevPermitted: this.config.reviewer.jev.allowEgress,
       resolvePolicy: (toolName, reason, argumentsText) => this.resolvePolicy(toolName, reason, argumentsText),
     })
   }
@@ -282,8 +398,10 @@ export class ReviewRuntime {
         enabledByDefault: this.config.enabledByDefault,
         maxReviewsPerTurn: this.config.budget.maxReviewsPerTurn,
         breakerTrips: live.circuitOpen,
-        defaultReviewerModel: this.config.reviewer.model ?? '',
-        defaultReviewerProvider: this.config.reviewer.provider ?? '',
+        defaultReviewerModel: this.reviewerModelLabel,
+        defaultReviewerProvider: this.reviewerProviderLabel,
+        defaultReviewerEngine: this.config.reviewer.engine,
+        defaultJevPermitted: this.config.reviewer.jev.allowEgress,
       }),
       consecutiveDenials: live.consecutiveDenials,
       pendingOverrides: live.pendingOverrides,
@@ -347,13 +465,13 @@ export class ReviewRuntime {
     next: () => Promise<ApprovalOutcome>,
   ): Promise<ApprovalOutcome> {
     const session = req.agent.session
-    if (!this.config.enabled) return await next()
-    if (!this.isEnabled(session)) return await next()
+    if (!this.config.enabled) return await this.handOff(session, 'plugin-disabled', next)
+    if (!this.isEnabled(session)) return await this.handOff(session, 'session-off', next)
     // The reviewer's own child session is never reviewed: a widened
     // `reviewer.tools` must not let the reviewer's asks recurse into the
     // answerer that is serving it.
-    if (this.isReviewerSession(session)) return await next()
-    if (!this.presetAllows(session)) return await next()
+    if (this.isReviewerSession(session)) return await this.handOff(session, 'reviewer-session', next)
+    if (!this.presetAllows(session)) return await this.handOff(session, 'access-mode', next)
 
     const rawArguments = this.argumentsFor(session, req.callId)
     // Policy rules match the RAW arguments: a rule that denies a call containing
@@ -363,7 +481,7 @@ export class ReviewRuntime {
 
     switch (resolved.policy) {
       case 'human':
-        return await next()
+        return await this.handOff(session, 'policy-human', next)
       case 'never':
         // The hard-disable stance: refuse deterministically, with a rationale the
         // model can read, and never consult a model or a human.
@@ -383,9 +501,10 @@ export class ReviewRuntime {
     }
 
     if (req.callId === undefined) {
-      // Without a call id the proposed action cannot be read, so there is no
-      // evidence to review. Delegating keeps a human in the loop.
-      return await next()
+      // Without a call id the proposed action cannot be read — the request event
+      // carries no arguments, so the call id is the only handle on the action —
+      // and there is no evidence to review. Delegating keeps a human in the loop.
+      return await this.handOff(session, 'no-call-id', next)
     }
 
     const override = this.sessions.consumeOverride(session, req.toolName, this.limits, VerdictCache.fingerprint(req.toolName, rawArguments))
@@ -406,7 +525,7 @@ export class ReviewRuntime {
         this.recordDecision(session, true)
         return 'rejected'
       }
-      return await next()
+      return await this.handOff(session, 'circuit', next)
     }
     if (!this.sessions.budgetAvailable(session, this.limits)) {
       if (this.config.budget.onExhausted === 'deny') {
@@ -421,7 +540,7 @@ export class ReviewRuntime {
         this.recordDecision(session, true)
         return 'rejected'
       }
-      return await next()
+      return await this.handOff(session, 'budget', next)
     }
 
     return await this.review(req, session, resolved.source, rawArguments, override, next)
@@ -451,17 +570,27 @@ export class ReviewRuntime {
     // deployment default in BOTH reviewer modes. Resolving it into the route
     // here — rather than only in the subagent dispatch below — is what keeps
     // `mode: direct` from silently ignoring the command.
-    const route = resolveReviewerRoute(
-      {
-        ...this.config.reviewer,
-        provider: this.reviewerProviderFor(session),
-        model: this.reviewerModelFor(session),
-      },
-      {
-        provider: req.agent.options.provider,
-        model: req.agent.options.model,
-      },
-    )
+    //
+    // The session's reviewer selection may have switched engines (picking an LLM
+    // route under a Jev deployment, or the reverse), so everything below reads the
+    // EFFECTIVE engine, never the deployment's `reviewer.engine`.
+    const identity = this.reviewerIdentityFor(session)
+    // The Jev engine has no LLM route to inherit: its route is the TypeSafe
+    // endpoint plus the Jev model, and it must be synthesized BEFORE the no-route
+    // guard below. Otherwise a Jev deployment whose agent has no provider or model
+    // would delegate every request and never call Jev at all.
+    const route: ReviewerRoute | undefined = identity.engine === 'jev'
+      ? { provider: JEV_ROUTE_PROVIDER, model: identity.model.length > 0 ? identity.model : this.config.reviewer.jev.model }
+      : resolveReviewerRoute(
+        {
+          provider: identity.provider.length > 0 ? identity.provider : undefined,
+          model: identity.model.length > 0 ? identity.model : undefined,
+        },
+        {
+          provider: req.agent.options.provider,
+          model: req.agent.options.model,
+        },
+      )
     if (route === undefined) {
       // No route means no reviewer; the human chain is the only safe owner.
       this.ctx.logger('dsh-approval-review').warn(
@@ -492,7 +621,7 @@ export class ReviewRuntime {
     // transcript in evidence, because otherwise the verdict also depends on the
     // conversation and could not be replayed from the action alone.
     const fingerprint = VerdictCache.fingerprint(session.id, JSON.stringify([req.toolName, rawArguments, req.reason, userIntent, route]))
-    if (this.cacheUsable && override === undefined) {
+    if (this.cacheUsableFor(identity.engine) && override === undefined) {
       const cached = this.cache.get(fingerprint)
       if (cached !== undefined) {
         this.cacheHits += 1
@@ -514,7 +643,48 @@ export class ReviewRuntime {
     // Resolved per review, exactly like the command output: a language switch
     // reaches the NEXT verdict. Prose already recorded is never rewritten.
     const outputLanguage = resolveOutputLanguage(this.ctx, this.config)
-    const result = this.config.reviewer.mode === 'subagent'
+    // One key resolution per review: the credential seam re-reads its sources, so
+    // a rotated key reaches the next verdict without a restart. The key itself is
+    // never logged — only where it came from.
+    const jevKey = identity.engine === 'jev' ? await this.resolveJevKey() : undefined
+    if (jevKey !== undefined) {
+      const log = this.ctx.logger('dsh-approval-review')
+      if (jevKey.source === 'none') {
+        log.warn(`no Jev API key: ${this.config.reviewer.jev.apiKeyEnv} is unset in the credential store and in the environment`)
+      } else {
+        log.debug(`Jev API key resolved from ${jevKey.source}${jevKey.detail === undefined ? '' : ` (${jevKey.detail})`}`)
+      }
+      const rejected = this.reviewerIdentityFor(session).rejectedOverride
+      if (rejected !== undefined) {
+        log.warn(`the session reviewer override "${rejected}" does not fit the Jev engine, which sends a bare model name; `
+          + `using ${this.config.reviewer.jev.model} instead`)
+      }
+    }
+    const result = identity.engine === 'jev'
+      ? await runJevReviewer({
+        endpoint: this.config.reviewer.jev.endpoint,
+        // The resolved route carries the session override, so `/approval-review
+        // model <jev id>` works exactly as it does on the LLM path.
+        model: route.model,
+        credential: jevKey?.key,
+        apiKeyEnv: this.config.reviewer.jev.apiKeyEnv,
+        timeoutMs: this.config.reviewer.jev.timeoutMs,
+        permitProbMin: this.config.reviewer.jev.permitProbMin,
+        prohibitedAt: this.config.reviewer.jev.prohibitedAt,
+        scopeBoundedAt: this.config.reviewer.jev.scopeBoundedAt,
+        rubric: this.config.reviewer.jev.rubric,
+        evidence: {
+          toolName: req.toolName,
+          argumentsText,
+          transcript,
+          userIntent,
+          ...req.reason === undefined ? {} : { askReason: req.reason },
+        },
+        outputLanguage,
+        exactActionApproval: override !== undefined,
+        ...req.signal === undefined ? {} : { signal: req.signal },
+      })
+      : this.config.reviewer.mode === 'subagent'
       ? await runSubagentReviewer(this.ctx, {
         ...this.reviewerProviderFor(session) === undefined ? {} : { provider: this.reviewerProviderFor(session)! },
         ...this.reviewerModelFor(session) === undefined ? {} : { model: this.reviewerModelFor(session)! },
@@ -564,9 +734,16 @@ export class ReviewRuntime {
         },
       )
     if (result.verdict === undefined) this.sessions.noteFailure(session)
-    else if (this.cacheUsable && override === undefined) this.cache.put(fingerprint, result.verdict)
+    else if (this.cacheUsableFor(identity.engine) && override === undefined) this.cache.put(fingerprint, result.verdict)
 
-    return await this.settle(req, session, policySource, route, result.verdict, result.durationMs, override, next, result.failure)
+    // Name the version that actually answered when the engine reports one: a
+    // Jev alias (`jev-latest`) resolves server-side, and thresholds tuned
+    // against one version must stay traceable to it in the ledger.
+    const routeLabel = result.answeredModel === undefined
+      ? `${route.provider}/${route.model}`
+      : `${route.provider}/${result.answeredModel}`
+
+    return await this.settle(req, session, policySource, route, result.verdict, result.durationMs, override, next, result.failure, routeLabel)
   }
 
   /**
@@ -581,6 +758,7 @@ export class ReviewRuntime {
    * @param override - the consumed one-shot authorization, when one applied.
    * @param next - the rest of the answerer chain.
    * @param failure - the reviewer's failure description, when it never answered.
+   * @param routeLabel - `provider/model` to record; defaults to the resolved route.
    * @returns the closed approval outcome.
    */
   private async settle(
@@ -593,10 +771,12 @@ export class ReviewRuntime {
     override: { toolName: string; reviewId?: string } | undefined,
     next: () => Promise<ApprovalOutcome>,
     failure?: string,
+    routeLabel?: string,
   ): Promise<ApprovalOutcome> {
     const callId = req.callId
     /* v8 ignore next -- callers reject callId-less requests before reaching here */
     if (callId === undefined) return await next()
+    const reviewerRoute = routeLabel ?? `${route.provider}/${route.model}`
 
     if (req.signal?.aborted === true) return 'cancelled'
     const gate = applyVerdictGates(this.config, verdict)
@@ -621,7 +801,7 @@ export class ReviewRuntime {
         ...verdict?.userAuthorization === undefined ? {} : { userAuthorization: verdict.userAuthorization },
         overridden: override !== undefined,
             // A route is only meaningful when a reviewer actually answered.
-            ...verdict === undefined ? {} : { reviewerRoute: `${route.provider}/${route.model}` },
+            ...verdict === undefined ? {} : { reviewerRoute },
             durationMs,
             uncertain: verdict?.uncertain === true,
           }),
@@ -650,7 +830,7 @@ export class ReviewRuntime {
         ...verdict?.risk === undefined ? {} : { risk: verdict.risk },
         ...verdict?.userAuthorization === undefined ? {} : { userAuthorization: verdict.userAuthorization },
         overridden: override !== undefined,
-        reviewerRoute: `${route.provider}/${route.model}`,
+        reviewerRoute,
         durationMs,
         uncertain: verdict?.uncertain === true,
       }),
@@ -683,7 +863,11 @@ export class ReviewRuntime {
     req: ApprovalRequestEvent,
     reason: string,
     next: () => Promise<ApprovalOutcome>,
+    code?: string,
   ): Promise<ApprovalOutcome> {
+    // Record WHY, for the status report: the short codes this path passes through
+    // are kept verbatim, while the gate's prose notes collapse to `gate`.
+    this.sessions.noteDelegation(req.agent.session, code ?? (/\s/u.test(reason) ? 'gate' : reason))
     this.ctx.logger('dsh-approval-review').debug(
       `left tool "${req.toolName}" to the composed answerers (${reason})`,
     )

@@ -525,6 +525,13 @@ export interface ReviewCallResult {
   readonly failure?: string
   /** Wall-clock duration of the call. */
   readonly durationMs: number
+  /**
+   * The model version that actually answered, when the engine reports one. The
+   * Jev API returns the resolved version for an alias request (`jev-1.13.0` for
+   * `jev-latest`), which is what the audit record should name: thresholds tuned
+   * against one version must be traceable to it.
+   */
+  readonly answeredModel?: string
 }
 
 /** Turn one thrown reviewer failure into a short audit-safe phrase. */

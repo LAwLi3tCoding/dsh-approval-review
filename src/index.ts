@@ -35,7 +35,8 @@ import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-session-projection'
-import { Config, type Config as ConfigShape } from './config.ts'
+import { Config, validateReviewerEngine, type Config as ConfigShape } from './config.ts'
+import { readCredentialSeam } from './jev-key.ts'
 import { auditView } from './audit.ts'
 import { ReviewRuntime } from './runtime.ts'
 import { outputIsZh } from './output-language.ts'
@@ -56,8 +57,44 @@ export const inject = ['commands', 'llm']
 export { Config }
 export type { ConfigShape }
 
+/**
+ * Reviewer route label the card and the status command show. Engine-aware: the
+ * Jev engine's route is the TypeSafe side, and reporting an inherited LLM route
+ * there would name a model that never sees the request.
+ */
+function reviewerLabels(config: ConfigShape): { readonly provider: string; readonly model: string } {
+  return config.reviewer.engine === 'jev'
+    ? { provider: 'typesafe', model: config.reviewer.jev.model }
+    : { provider: config.reviewer.provider ?? '', model: config.reviewer.model ?? '' }
+}
+
+/** Whether the configured environment variable currently holds a non-empty value. */
+function reviewerKeyInEnvironment(config: ConfigShape): boolean {
+  return (process.env[config.reviewer.jev.apiKeyEnv] ?? '').trim().length > 0
+}
+
+/**
+ * Whether the Jev key is PROVABLY missing: absent from the process environment
+ * and no credential seam is mounted that could hold it.
+ *
+ * Deliberately conservative. A mounted credential service resolves its own layers
+ * (launch environment, managed store, project and harness-home `.env`) and does so
+ * asynchronously while `apply` is synchronous — claiming "missing" there would be
+ * a false alarm on exactly the deployment shape this plugin recommends. A key that
+ * really is unreachable still surfaces as a precise failure on the first review,
+ * which follows `onReviewerFailure`.
+ * @param ctx - the mounting context, read for the credential seam.
+ * @param config - validated plugin configuration.
+ * @returns true only when no source could possibly provide the key.
+ */
+function jevKeyProvablyMissing(ctx: Context, config: ConfigShape): boolean {
+  if (reviewerKeyInEnvironment(config)) return false
+  return readCredentialSeam(ctx.get('credentials')) === undefined
+}
+
 /** Build the default audit view for a session with no folded state yet. */
 function emptyView(config: ConfigShape): ReturnType<typeof auditView> {
+  const labels = reviewerLabels(config)
   return auditView(
     {
       records: [], pending: {}, arguments: {}, turn: 0, step: 0,
@@ -68,14 +105,36 @@ function emptyView(config: ConfigShape): ReturnType<typeof auditView> {
       enabledByDefault: config.enabledByDefault,
       maxReviewsPerTurn: config.budget.maxReviewsPerTurn,
       breakerTrips: false,
-      defaultReviewerModel: config.reviewer.model ?? '',
-      defaultReviewerProvider: config.reviewer.provider ?? '',
+      defaultReviewerModel: labels.model,
+      defaultReviewerProvider: labels.provider,
+      defaultReviewerEngine: config.reviewer.engine,
+      defaultJevPermitted: config.reviewer.jev.allowEgress,
     },
   )
 }
 
 /** Register the answerer, the rationale carrier, the command, and the card feed. */
 export function apply(ctx: Context, config: ConfigShape): void {
+  // Engine misconfiguration fails the mount instead of surfacing on the first
+  // approval: an unusable reviewer that silently hands work to the human chain
+  // looks like a policy decision, which is exactly the wrong signal.
+  const problems = validateReviewerEngine(config)
+  for (const warning of problems.warnings) ctx.logger('dsh-approval-review').warn(warning)
+  if (problems.errors.length > 0) {
+    throw new Error(`dsh-approval-review: ${problems.errors.join(' ')}`)
+  }
+  // The Jev key comes from the harness credential seam first (the app's credential
+  // settings, `$DSH_HOME/.env`, or the launch environment) and from `process.env`
+  // as the fallback. Warn at MOUNT only in the case that cannot possibly work, so
+  // the startup log names the real problem instead of turning every review into a
+  // silent human handoff.
+  if (config.reviewer.engine === 'jev' && jevKeyProvablyMissing(ctx, config)) {
+    ctx.logger('dsh-approval-review').warn(
+      `reviewer.engine is "jev" but ${config.reviewer.jev.apiKeyEnv} is unset and no credential store is mounted: `
+      + 'every review will report a missing credential and follow `onReviewerFailure`. Store the key through the '
+      + 'harness credential settings (or `$DSH_HOME/.env`), then restart.',
+    )
+  }
   const runtime = new ReviewRuntime(ctx, config)
 
   // Committed events drive both the live counters and the folded ledger. The
@@ -164,13 +223,43 @@ export function apply(ctx: Context, config: ConfigShape): void {
           const view = runtime.liveView(session)
           const last = view.records.find(record => record.reason !== undefined) ?? view.records[0]
           const cache = runtime.stats()
+          const engineNote = [
+            config.reviewer.jev.allowEgress ? '' : 'egress not acknowledged',
+            view.reviewerEngine === 'jev' && jevKeyProvablyMissing(ctx, config)
+              ? `${config.reviewer.jev.apiKeyEnv} missing`
+              : '',
+          ].filter(note => note.length > 0).join(', ')
+          // The EFFECTIVE engine: a session selection from the picker may have
+          // switched it, and saying "llm" while Jev answers would be a lie.
+          const engine = view.reviewerEngine === 'jev'
+            ? `jev (${view.reviewerModel}${engineNote.length > 0 ? `, ${engineNote}` : ''})`
+            : `llm${config.reviewer.mode === 'subagent' ? `/${config.reviewer.mode}` : ''}`
+          const overrideNote = view.reviewerEngine === config.reviewer.engine
+            ? ''
+            : (zh
+              ? `｜会话覆盖（部署默认 ${config.reviewer.engine}）`
+              : ` | session override (deployment: ${config.reviewer.engine})`)
+          // The preset gate is the other reason a ledger stays empty while every
+          // line above looks healthy: the plugin claims nothing unless the
+          // session's access mode is the configured preset.
+          const gate = config.reviewerPreset.length === 0
+            ? (zh ? '任意访问模式' : 'any access mode')
+            : (zh ? `访问模式 ${config.reviewerPreset}` : `access mode ${config.reviewerPreset}`)
+          // Requests this plugin deliberately did NOT decide, with the reason code.
+          // Without it, a ledger row that carries no rationale is unreadable: the
+          // operator cannot tell "the reviewer never saw it" from "the reviewer
+          // saw it and handed it over".
+          const leftToHuman = runtime.delegationsThisTurn(session)
           const lines = [
             zh
-              ? `自动审批：${view.enabled ? '开启' : '关闭'}｜复核模式 ${config.reviewer.mode}${config.reviewer.mode === 'subagent' ? ` (${config.reviewer.subagentProvider})` : ''}｜模型 ${view.reviewerModel.length > 0 ? `${view.reviewerProvider.length > 0 ? `${view.reviewerProvider}/` : ''}${view.reviewerModel}` : '继承会话'}`
-              : `Automatic approval review: ${view.enabled ? 'on' : 'off'} | reviewer ${config.reviewer.mode}${config.reviewer.mode === 'subagent' ? ` (${config.reviewer.subagentProvider})` : ''} | model ${view.reviewerModel.length > 0 ? `${view.reviewerProvider.length > 0 ? `${view.reviewerProvider}/` : ''}${view.reviewerModel}` : 'inherit session'}`,
+              ? `自动审批：${view.enabled ? '开启' : '关闭'}｜复核引擎 ${engine}${overrideNote}｜门控 ${gate}｜模型 ${view.reviewerModel.length > 0 ? `${view.reviewerProvider.length > 0 ? `${view.reviewerProvider}/` : ''}${view.reviewerModel}` : '继承会话'}`
+              : `Automatic approval review: ${view.enabled ? 'on' : 'off'} | engine ${engine}${overrideNote} | gate ${gate} | model ${view.reviewerModel.length > 0 ? `${view.reviewerProvider.length > 0 ? `${view.reviewerProvider}/` : ''}${view.reviewerModel}` : 'inherit session'}`,
             zh
               ? `本回合：复审 ${view.reviewsThisTurn}/${view.maxReviewsPerTurn}｜复核失败 ${runtime.failuresThisTurn(session)}/${config.maxFailuresPerTurn}｜连续否决 ${view.consecutiveDenials}`
               : `This turn: reviews ${view.reviewsThisTurn}/${view.maxReviewsPerTurn} | reviewer failures ${runtime.failuresThisTurn(session)}/${config.maxFailuresPerTurn} | consecutive denials ${view.consecutiveDenials}`,
+            ...leftToHuman.length === 0 ? [] : [zh
+              ? `本回合未交复核：${leftToHuman.join('｜')}`
+              : `Left to the human chain this turn: ${leftToHuman.join(' | ')}`],
             zh
               ? `累计审批 ${view.total} 次，否决 ${view.refused} 次｜熔断${view.circuitOpen ? '已触发' : '未触发'}｜可用一次性放行 ${view.pendingOverrides}`
               : `Approvals ${view.total}, refusals ${view.refused} | breaker ${view.circuitOpen ? 'open' : 'closed'} | pending overrides ${view.pendingOverrides}`,

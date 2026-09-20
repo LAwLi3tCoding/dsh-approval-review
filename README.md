@@ -20,6 +20,48 @@ circuit breaker stops the agent from looping on escalation attempts.
 > not configured to take over. Requests it does not own are delegated with
 > `next()`, unchanged.
 
+## 0.5: Jev as an optional reviewer engine
+
+`reviewer.engine` now chooses **who reviews**: the original LLM route, or
+[TypeSafe's Jev](https://docs.typesafe.ai/) (System One). Jev is a decision model —
+it answers typed questions with probabilities instead of writing prose — so one
+review is a single HTTP call with no tool loop. Measured on this plugin's own case
+set: ~0.9 s per review against 4–12 s for the LLM reviewer, and 16/16 agreement
+with the expected policy outcomes. Everything downstream of the verdict — risk
+gate, breaker, cache, ledger, Approvals tab — is shared by both engines.
+
+**To use Jev:**
+
+1. **Store the key** where the harness resolves credentials: the harness
+   credential settings, or `$DSH_HOME/.env` as `TYPESAFE_API_KEY=…`. The plugin
+   asks the credential store first (which itself layers the launch environment, the
+   managed store and `.env` files) and falls back to the process environment; it
+   re-resolves per review, so a rotated key applies to the next verdict with no
+   restart.
+
+2. **Turn the engine on** in your profile patch. An id-targeted override replaces
+   the whole row config, so restate any key you still want:
+
+   ```yaml
+   - id: approval-review
+     config:
+       reviewer:
+         engine: jev
+         jev:
+           allowEgress: true
+   ```
+
+3. **Restart** the harness (the engine is read at mount) and run
+   `/approval-review status`. It prints the engine, the access-mode gate and the
+   model, so a silent ledger always has a visible cause.
+
+Two guards are deliberate: `allowEgress: true` is required because Jev is a
+third-party endpoint and the evidence packet leaves the machine, and a selection
+that does not fit the engine in force is reported rather than forwarded. Pick any
+Jev model or LLM route from the Approvals tab — the choice carries its engine and
+applies to that session only. The full contract, including what each engine can and
+cannot do, is in [Reviewer engines](#reviewer-engines-llm-and-jev).
+
 ## What it does
 
 | | |
@@ -94,7 +136,8 @@ schema defaults.
 | `reviewTools` | `['*']` | All tool approval requests by default. |
 | `defaultPolicy` | `ai` | Fallback routing policy for unmatched tools. |
 | `rules` | `[]` | Ordered `{pattern, policy, field?, note?}` regex rules, evaluated before the tool table. `field` is `reason` (default), `toolName`, or `arguments`. |
-| `reviewer.mode` | `direct` | Isolated model call by default: no inherited parent prompt, history, skills or memory. Optional `subagent` can inspect the workspace. |
+| `reviewer.engine` | `llm` | Which engine answers: the original LLM reviewer, or TypeSafe's Jev. See [Reviewer engines](#reviewer-engines-llm-and-jev). |
+| `reviewer.mode` | `direct` | Isolated model call by default: no inherited parent prompt, history, skills or memory. Optional `subagent` can inspect the workspace. Applies to `engine: llm` only. |
 | `reviewer.provider` / `.model` | *(inherit)* | Reviewer route; unset inherits the calling agent's own route. |
 | `reviewer.subagentProvider` | `spawn` | Optional subagent backend; `spawn` omits parent history but still inherits the host preset. |
 | `reviewer.inspectLocalState` | `true` | Enable the bounded local inspector in direct mode. |
@@ -129,6 +172,105 @@ schema defaults.
 | `feedReasonToModel` | `true` | Append the rationale to the refused tool result. |
 | `recordAllowedVerdicts` | `true` | Append the **allow** verdict to the accepted tool result, so the card can show why an action was allowed. Costs one short marker block in the model context per auto-allowed call. |
 | `language` | `auto` | **Prose** language this plugin emits: `/approval-review` command output and the reviewer's `reason`/`suggestion` fields. `auto` follows the harness language setting (Settings → General → Language), `en`/`zh` pin it. Resolved per call, so a switch applies to the next command and the next verdict. Boundaries: the `decision`/`risk` enums stay English tokens (the parser validates them), and text already recorded in the transcript — an earlier verdict's prose, an earlier command's output — is never rewritten. |
+
+### Reviewer engines: `llm` and `jev`
+
+`reviewer.engine` chooses who answers a review. `llm` (the default) is the original
+path: one model call — or a read-only subagent — reads the evidence packet and
+returns the verdict JSON. `jev` posts the same packet to
+[TypeSafe's System One endpoint](https://docs.typesafe.ai/api) and reads typed
+answers back, with the decisions (prohibition hit, uncertainty, bounded scope)
+applied in code. Everything downstream of the verdict — the risk gate, the
+breaker, the cache, the ledger and the card — is shared by both engines.
+
+Jev never touches DSH's model routes: it is a direct HTTP call with a bearer key,
+so it does not appear in the model picker and needs no provider registration. The
+`typesafe/<model>` value shown in the ledger is a label the plugin synthesizes for
+its own audit record, not a DSH route; `/approval-review model <id>` still works
+and overrides the model name or version sent to TypeSafe.
+
+A selection from the picker **carries its engine**: `typesafe/<model>` reviews with
+Jev, `<provider>/<model>` reviews with that LLM route, a bare `<model>` keeps the
+engine already in force and replaces only the model, and `default` returns to the
+deployment's own reviewer. That is what makes every listed row mean something —
+including switching a Jev deployment back to an LLM for one session, which the
+header pill and the ledger both follow. Two limits hold: a session may switch to
+Jev only when the deployment acknowledged egress (`jev.allowEgress`), and the Jev
+endpoint receives a bare model name, so a value that still contains `/` after the
+`typesafe/` marker is stripped is reported and ignored rather than forwarded.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `reviewer.jev.endpoint` | `https://api.typesafe.ai/v1/systemone` | Where the evidence is POSTed. Point it at your own gateway if the packet must not go upstream directly. |
+| `reviewer.jev.model` | `jev-latest` | Model or alias. The response reports the version that answered (`jev-1.13.0`), and that is what the ledger records. |
+| `reviewer.jev.apiKeyEnv` | `TYPESAFE_API_KEY` | Environment variable holding the key. The key is never read from config, never logged, never written to the audit record. |
+| `reviewer.jev.timeoutMs` | `8000` | Deadline for the single HTTP call; independent of `reviewer.timeoutMs`. |
+| `reviewer.jev.permitProbMin` | `0.6` | Top probability below which the permit answer counts as `uncertain`. |
+| `reviewer.jev.prohibitedAt` | `0.5` | Probability at which any of the four prohibitions refuses outright, regardless of authorization. Deliberately asymmetric: a false refusal is cheaper than a false allow. |
+| `reviewer.jev.scopeBoundedAt` | `0.5` | Probability at which the scope answer counts as bounded. |
+| `reviewer.jev.allowEgress` | `false` | Must be `true` for the plugin to mount. Otherwise loading fails and names the endpoint the evidence would reach. |
+| `reviewer.jev.rubric` | `{}` | Per-question `instructions` overrides keyed by question id (see `src/jev-questions.ts`). |
+
+What differs in practice:
+
+- **One HTTP call per review, no tool loop.** Jev cannot inspect local state, so a
+  request whose decisive fact is not in the evidence becomes `uncertain` and
+  follows `onUncertain` (a human prompt by default) instead of being investigated.
+  `reviewer.mode` and `reviewer.inspectLocalState` do not apply.
+- **`reason` is composed in code** from the answers — for example
+  `Denied: prohibition "disclosure of secrets or private data" (0.97); risk critical; authorization unknown; permit 1.00` —
+  in the configured output language. `reviewer.policyText` does not apply: the
+  ruling policy lives in the per-question rubric.
+- **The evidence packet leaves the machine**, which is what `allowEgress`
+  acknowledges. Redaction is unchanged (key-name based, plus a best-effort pass
+  over unparsable payloads); it does not scrub secrets out of free text.
+- **The key is resolved through the harness credential store first, then the
+  environment.** Store it in the credential settings, in `$DSH_HOME/.env`, or
+  export it before launch: the credential seam already layers those sources (launch
+  environment → managed store → project `.env` → harness-home `.env`) and
+  re-resolves per request, so a rotated key applies to the next verdict without a
+  restart. A GUI-launched harness never runs your shell startup files, which is why
+  the store — not `~/.zshenv` — is the place that works.
+
+What happens when Jev is not configured, or only half configured:
+
+| State | Result |
+|---|---|
+| `reviewer.engine` left at `llm` (the default) | The LLM reviewer runs. No request reaches TypeSafe, no key is needed, and no Jev warning is logged. |
+| `engine: jev` without `jev.allowEgress: true` | The plugin refuses to mount, naming the endpoint the evidence would reach. Nothing is reviewed automatically. |
+| `engine: jev`, egress acknowledged, but no key resolvable from the store or the environment | The plugin mounts and warns at startup when no credential store is mounted; with a store, the first review fails with a missing-credential message instead. Either way the failure follows `onReviewerFailure` — `delegate` by default, so the request reaches a human instead of being silently allowed. After `maxFailuresPerTurn` failures the turn stops consulting the reviewer at all. |
+| `engine: jev` with `mode: subagent`, or a non-https endpoint | The plugin refuses to mount. |
+| Key rejected (`401`/`403`), rate limited (`429`), `5xx`, timeout, non-JSON, or a missing answer | Recorded as a reviewer failure; no retry and no partial answer is acted on. |
+| Session access mode is not `reviewerPreset` | The plugin claims nothing, by design — the ledger stays empty and `/approval-review status` names the gate. |
+
+#### Enabling Jev on a fresh install
+
+1. **Store the key** where the harness can resolve it: the harness credential
+   settings, or `$DSH_HOME/.env` as `TYPESAFE_API_KEY=…`. Both are read per review;
+   `process.env` is the fallback for a deployment that mounts no credentials row.
+2. **Turn the engine on** in your profile patch. An id-targeted override replaces
+   the whole row config, so restate any key you still want:
+
+   ```yaml
+   - id: approval-review
+     config:
+       reviewer:
+         engine: jev
+         jev:
+           allowEgress: true
+   ```
+
+3. **Restart** the harness (the engine is read at mount) and run
+   `/approval-review status`: it prints the engine, the gate and the model, so a
+   silent ledger always has a visible cause.
+
+Verify connectivity before enabling it — the live probe sends synthetic evidence
+only, never repository content:
+
+```bash
+export TYPESAFE_API_KEY=…     # the same key the plugin resolves at review time
+npx vitest run tests/jev-live.test.ts tests/jev-policy-live.test.ts
+```
 
 ### Tool policies
 

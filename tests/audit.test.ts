@@ -297,15 +297,37 @@ describe('applyAuditEvent', () => {
 })
 
 describe('auditView', () => {
+  it('reports the reviewer a session selection switched to', () => {
+    const defaults = {
+      enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false,
+      defaultReviewerProvider: 'typesafe', defaultReviewerModel: 'jev-latest', defaultReviewerEngine: 'jev' as const,
+      defaultJevPermitted: true,
+    }
+    // The deployment's own reviewer until a session selects another one.
+    expect(auditView(initAuditState(), defaults)).toMatchObject({ reviewerEngine: 'jev', reviewerModel: 'jev-latest' })
+    const after = (args: string): ReturnType<typeof auditView> => auditView(
+      fold([event('command/run', { commandId: 'm', name: COMMAND_NAME, args, source: 'user' })]),
+      defaults,
+    )
+    // A Jev row keeps the Jev engine and pins the version.
+    expect(after('model typesafe/jev-1.13.0')).toMatchObject({ reviewerEngine: 'jev', reviewerModel: 'jev-1.13.0' })
+    // An LLM row switches the session to that route: the picker lists it, so
+    // choosing it has to mean something.
+    expect(after('model mtfriday/deepseek-v4-flash'))
+      .toMatchObject({ reviewerEngine: 'llm', reviewerProvider: 'mtfriday', reviewerModel: 'deepseek-v4-flash' })
+    // `default` returns to the deployment's own reviewer.
+    expect(after('model default')).toMatchObject({ reviewerEngine: 'jev', reviewerModel: 'jev-latest' })
+  })
+
   it('applies the deployment switch default when the log carries no override', () => {
-    const view = auditView(initAuditState(), { enabledByDefault: false, maxReviewsPerTurn: 7, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerModel: '' })
+    const view = auditView(initAuditState(), { enabledByDefault: false, maxReviewsPerTurn: 7, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerEngine: 'llm', defaultJevPermitted: false, defaultReviewerModel: '' })
     expect(view.enabled).toBe(false)
     expect(view.maxReviewsPerTurn).toBe(7)
   })
 
   it('prefers the logged override over the default', () => {
     const state = fold([event('command/run', { commandId: 'x', name: COMMAND_NAME, args: 'off', source: 'user' })])
-    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 7, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerModel: '' })
+    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 7, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerEngine: 'llm', defaultJevPermitted: false, defaultReviewerModel: '' })
     expect(view.enabled).toBe(false)
   })
 
@@ -315,7 +337,7 @@ describe('auditView', () => {
       event('approval/asked', { id: 'a', toolName: 'bash' }),
       event('approval/decided', { id: 'a', outcome: 'rejected' }),
     ])
-    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 7, breakerTrips: true, defaultReviewerProvider: '', defaultReviewerModel: '' })
+    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 7, breakerTrips: true, defaultReviewerProvider: '', defaultReviewerEngine: 'llm', defaultJevPermitted: false, defaultReviewerModel: '' })
     expect(view.refused).toBe(1)
     expect(view.total).toBe(1)
     expect(view.consecutiveDenials).toBe(1)
@@ -386,7 +408,7 @@ describe('reviewer-model override', () => {
   it('records a durable model override from the command', () => {
     const state = withModel('model deepseek-chat')
     expect(state.modelOverride).toBe('deepseek-chat')
-    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerModel: 'default-model' })
+    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerEngine: 'llm', defaultJevPermitted: false, defaultReviewerModel: 'default-model' })
     expect(view.reviewerModel).toBe('deepseek-chat')
   })
 
@@ -394,7 +416,7 @@ describe('reviewer-model override', () => {
     const state = withModel('model openai-codex/gpt-5.6-luna')
     expect(state.modelOverride).toBe('gpt-5.6-luna')
     expect(state.providerOverride).toBe('openai-codex')
-    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerModel: '' })
+    const view = auditView(state, { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerEngine: 'llm', defaultJevPermitted: false, defaultReviewerModel: '' })
     expect(view.reviewerProvider).toBe('openai-codex')
     expect(view.reviewerModel).toBe('gpt-5.6-luna')
   })
@@ -416,12 +438,12 @@ describe('reviewer-model override', () => {
   })
 
   it('falls back to the deployment default without an override', () => {
-    const view = auditView(initAuditState(), { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerModel: 'default-model' })
+    const view = auditView(initAuditState(), { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerEngine: 'llm', defaultJevPermitted: false, defaultReviewerModel: 'default-model' })
     expect(view.reviewerModel).toBe('default-model')
   })
 
   it('reports an empty string when nothing is configured', () => {
-    const view = auditView(initAuditState(), { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerModel: '' })
+    const view = auditView(initAuditState(), { enabledByDefault: true, maxReviewsPerTurn: 10, breakerTrips: false, defaultReviewerProvider: '', defaultReviewerEngine: 'llm', defaultJevPermitted: false, defaultReviewerModel: '' })
     expect(view.reviewerModel).toBe('')
   })
 

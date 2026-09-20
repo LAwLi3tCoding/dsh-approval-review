@@ -32,6 +32,26 @@ function enterTurn(sessions: ReviewSessions, target: Session, turn: number): voi
   sessions.observe(target, { type: 'turn/start', data: { turn } })
 }
 
+describe('ReviewSessions delegations', () => {
+  it('counts reason codes, most frequent first', () => {
+    const sessions = new ReviewSessions()
+    const target = session()
+    sessions.noteDelegation(target, 'no-call-id')
+    sessions.noteDelegation(target, 'no-call-id')
+    sessions.noteDelegation(target, 'access-mode')
+    expect(sessions.delegations(target)).toEqual(['no-call-id×2', 'access-mode×1'])
+  })
+
+  it('starts empty and clears when the turn rolls over', () => {
+    const sessions = new ReviewSessions()
+    const target = session()
+    expect(sessions.delegations(target)).toEqual([])
+    sessions.noteDelegation(target, 'no-call-id')
+    enterTurn(sessions, target, 1)
+    expect(sessions.delegations(target)).toEqual([])
+  })
+})
+
 describe('ReviewSessions budget', () => {
   it('allows reviews until the budget is spent', () => {
     const sessions = new ReviewSessions()

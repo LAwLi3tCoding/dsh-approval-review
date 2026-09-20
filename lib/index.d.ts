@@ -49,7 +49,46 @@ interface RiskRuleConfig {
 /** Reviewer model and prompt configuration. */
 /** How the reviewer is run. */
 type ReviewerMode = 'subagent' | 'direct';
+/**
+ * Which engine answers the review.
+ *
+ * `llm` is the original path: a model call (or a read-only subagent) reads the
+ * evidence packet and returns the verdict JSON. `jev` posts the same evidence to
+ * TypeSafe's System One endpoint and reads typed answers back, with the decision
+ * thresholds applied in code. The engine is chosen once per mount; the two never
+ * mix, and every consumer downstream of the verdict is engine-agnostic.
+ */
+type ReviewerEngine = 'llm' | 'jev';
+/** TypeSafe (Jev) engine settings; inert unless `reviewer.engine: jev`. */
+interface JevConfig {
+  /** Full URL of the System One evaluation endpoint. */
+  readonly endpoint: string;
+  /** Model name or alias sent in the request (`jev-latest` follows upstream releases). */
+  readonly model: string;
+  /** Environment variable holding the API key; the key never comes from config. */
+  readonly apiKeyEnv: string;
+  /** Hard deadline for the single HTTP call. */
+  readonly timeoutMs: number;
+  /** Top probability below which the permit answer counts as uncertain. */
+  readonly permitProbMin: number;
+  /** Probability at which a prohibition answer refuses the action outright. */
+  readonly prohibitedAt: number;
+  /** Probability at which the scope answer counts as bounded. */
+  readonly scopeBoundedAt: number;
+  /**
+   * Explicit acknowledgement that the evidence packet leaves this machine for
+   * {@link endpoint}. Load fails while this is false, because a deployment that
+   * turns the engine on should have decided that question on purpose.
+   */
+  readonly allowEgress: boolean;
+  /** Per-question instruction overrides, keyed by a question id from `jev-questions.ts`. */
+  readonly rubric: Record<string, string>;
+}
 interface ReviewerConfig {
+  /** Which engine answers: the LLM path or TypeSafe's Jev. */
+  readonly engine: ReviewerEngine;
+  /** Jev settings; inert unless {@link engine} is `jev`. */
+  readonly jev: JevConfig;
   /** `subagent` runs a read-only child; `direct` makes one plain model call. */
   readonly mode: ReviewerMode;
   /** Provider route for the reviewer; unset inherits the calling agent's provider. */
@@ -274,6 +313,18 @@ interface AuditView {
    * default, which itself falls back to the calling agent's provider).
    */
   readonly reviewerProvider: string;
+  /**
+   * Which engine answers reviews IN THIS SESSION: the deployment's choice, unless
+   * the session selected a reviewer from the other engine through the picker.
+   * This is what the header pill shows and what the runtime dispatches on.
+   */
+  readonly reviewerEngine: 'llm' | 'jev';
+  /**
+   * Whether the picker may offer Jev models at all: the deployment acknowledged
+   * that evidence leaves the machine (`reviewer.jev.allowEgress`). A session
+   * selection can never grant this itself.
+   */
+  readonly jevSelectable: boolean;
 }
 /** Raw projection state; the wire view is derived from it. */
 interface AuditState {
@@ -294,6 +345,14 @@ interface AuditState {
   readonly modelOverride?: string;
   /** Provider half of {@link modelOverride}; absent means the configured route. */
   readonly providerOverride?: string;
+  /**
+   * Engine the session selection implies, written alongside the provider half.
+   *
+   * The picker lists reviewers from both engines, so choosing a row has to be able
+   * to switch which engine answers; a bare model id leaves this unset and keeps the
+   * deployment's engine.
+   */
+  readonly engineOverride?: 'llm' | 'jev';
   readonly reviewsThisTurn: number;
   readonly denialsStreak: number;
   readonly window: readonly boolean[];
@@ -320,6 +379,10 @@ declare function auditView(state: AuditState, defaults: {
   readonly defaultReviewerModel: string;
   /** Deployment default provider half; `''` inherits the calling agent's. */
   readonly defaultReviewerProvider: string;
+  /** Engine the deployment selected; not influenced by any session override. */
+  readonly defaultReviewerEngine: 'llm' | 'jev';
+  /** `reviewer.jev.allowEgress`: whether a session may switch to Jev at all. */
+  readonly defaultJevPermitted: boolean;
 }): AuditView;
 //#endregion
 //#region src/output-language.d.ts

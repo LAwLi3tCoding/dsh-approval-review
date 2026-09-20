@@ -39,6 +39,25 @@
         # Reviewer model, prompt, and size limits. `provider`/`model` unset means
         # the reviewer inherits the calling agent's own route.
         reviewer:
+          # Engine: `llm` (default) keeps the model/subagent reviewer configured
+          # below; `jev` posts the same evidence packet to TypeSafe System One and
+          # applies the thresholds in code. Enabling it also requires the API key
+          # in the environment and `jev.allowEgress: true` — the plugin refuses to
+          # mount otherwise, because the evidence would leave this machine.
+          engine: llm
+          # jev:
+          #   model: jev-latest          # or pin a version, e.g. jev-1.13.0
+          #   apiKeyEnv: TYPESAFE_API_KEY
+          #   allowEgress: true          # acknowledges the evidence leaves the host
+          #   timeoutMs: 8000
+          #   permitProbMin: 0.6         # below this the permit answer is `uncertain`
+          #   prohibitedAt: 0.5          # any prohibition at/above this refuses outright
+          #   scopeBoundedAt: 0.5
+          #   endpoint: https://api.typesafe.ai/v1/systemone
+          #   rubric: {}                 # per-question instruction overrides
+          # Note: `mode`, `inspectLocalState`, `temperature`, `maxTokens` and
+          # `policyText` do not apply to the Jev engine — it makes one HTTP call
+          # with no tool loop and no prompt, so evidence gaps become `uncertain`.
           mode: direct
           # 120s, not 60s: a reasoning reviewer on a slower route measured 52.5s
           # here, and a deadline that expires mid-review is not a "no" — it is a

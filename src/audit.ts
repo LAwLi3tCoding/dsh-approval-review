@@ -27,6 +27,7 @@ import type {} from '@deepseek-ai/dsh-session-projection/types'
 // fold can narrow on it.
 import type {} from '@deepseek-ai/dsh-commands/types'
 import type { UserAuthorization, RiskLevel, ReviewOutcome, ToolPolicy } from './review-types.ts'
+import { effectiveReviewerModel, JEV_ROUTE_PROVIDER } from './model-override.ts'
 
 /** The projection key the card reads. */
 export const AUDIT_PROJECTION_KEY = 'approvalReview'
@@ -150,6 +151,18 @@ export interface AuditView {
    * default, which itself falls back to the calling agent's provider).
    */
   readonly reviewerProvider: string
+  /**
+   * Which engine answers reviews IN THIS SESSION: the deployment's choice, unless
+   * the session selected a reviewer from the other engine through the picker.
+   * This is what the header pill shows and what the runtime dispatches on.
+   */
+  readonly reviewerEngine: 'llm' | 'jev'
+  /**
+   * Whether the picker may offer Jev models at all: the deployment acknowledged
+   * that evidence leaves the machine (`reviewer.jev.allowEgress`). A session
+   * selection can never grant this itself.
+   */
+  readonly jevSelectable: boolean
 }
 
 /** Raw projection state; the wire view is derived from it. */
@@ -171,6 +184,14 @@ export interface AuditState {
   readonly modelOverride?: string
   /** Provider half of {@link modelOverride}; absent means the configured route. */
   readonly providerOverride?: string
+  /**
+   * Engine the session selection implies, written alongside the provider half.
+   *
+   * The picker lists reviewers from both engines, so choosing a row has to be able
+   * to switch which engine answers; a bare model id leaves this unset and keeps the
+   * deployment's engine.
+   */
+  readonly engineOverride?: 'llm' | 'jev'
   readonly reviewsThisTurn: number
   readonly denialsStreak: number
   readonly window: readonly boolean[]
@@ -310,12 +331,12 @@ export function applyAuditEvent(
       if (action === 'approve') return state // Pending grants live only in ReviewSessions; never revive on replay.
       if (action === 'model') {
         const value = args.split(/\s+/u).slice(1).join(' ').trim()
-        // `model default` clears both halves back to the deployment default.
+        // `model default` clears the whole selection back to the deployment default.
         if (value.length === 0 || value === 'default') {
           // Drop the keys rather than set them to undefined: the state is
           // persisted JSON, and explicit undefined keys are noise the cache
           // has to carry.
-          const { modelOverride: _m, providerOverride: _p, ...rest } = state
+          const { modelOverride: _m, providerOverride: _p, engineOverride: _e, ...rest } = state
           return rest
         }
         // `[<provider>/]<model>`: a model id may itself contain `/` in some
@@ -323,12 +344,22 @@ export function applyAuditEvent(
         // counts as the provider form.
         const slash = value.indexOf('/')
         if (slash > 0 && slash < value.length - 1 && !value.slice(slash + 1).includes('/')) {
-          return { ...state, providerOverride: value.slice(0, slash), modelOverride: value.slice(slash + 1) }
+          const provider = value.slice(0, slash)
+          return {
+            ...state,
+            // The provider half NAMES THE ENGINE: `typesafe/<model>` is a Jev
+            // selection, anything else is an LLM route. That is what lets one
+            // picker row mean something under either deployment engine, instead
+            // of being listed and then discarded by the engine in force.
+            engineOverride: provider === JEV_ROUTE_PROVIDER ? 'jev' : 'llm',
+            providerOverride: provider,
+            modelOverride: value.slice(slash + 1),
+          }
         }
-        // A bare model id clears a previous provider override: the two travel
-        // together, and keeping a stale provider is how a session ends up
-        // asking the wrong vendor for a model id.
-        const { providerOverride: _stale, ...rest } = state
+        // A bare model id keeps the engine in force and replaces only the model:
+        // the two travel together, and keeping a stale provider is how a session
+        // ends up asking the wrong vendor for a model id.
+        const { providerOverride: _stale, engineOverride: _staleEngine, ...rest } = state
         return { ...rest, modelOverride: value }
       }
       return state
@@ -377,8 +408,24 @@ export function auditView(
     readonly defaultReviewerModel: string
     /** Deployment default provider half; `''` inherits the calling agent's. */
     readonly defaultReviewerProvider: string
+    /** Engine the deployment selected; not influenced by any session override. */
+    readonly defaultReviewerEngine: 'llm' | 'jev'
+    /** `reviewer.jev.allowEgress`: whether a session may switch to Jev at all. */
+    readonly defaultJevPermitted: boolean
   },
 ): AuditView {
+  // The card shows the reviewer actually in force, resolved by the same rule the
+  // runtime routes with — including the engine, which a session selection may
+  // switch but never past the deployment's egress acknowledgement.
+  const identity = effectiveReviewerModel({
+    engine: defaults.defaultReviewerEngine,
+    ...state.engineOverride === undefined ? {} : { overrideEngine: state.engineOverride },
+    ...state.providerOverride === undefined ? {} : { overrideProvider: state.providerOverride },
+    ...state.modelOverride === undefined ? {} : { overrideModel: state.modelOverride },
+    defaultProvider: defaults.defaultReviewerProvider,
+    defaultModel: defaults.defaultReviewerModel,
+    jevPermitted: defaults.defaultJevPermitted,
+  })
   return {
     records: state.records,
     enabled: state.enabledOverride ?? defaults.enabledByDefault,
@@ -389,8 +436,10 @@ export function auditView(
     total: state.total,
     refused: state.refused,
     pendingOverrides: state.pendingOverrides,
-    reviewerModel: state.modelOverride ?? defaults.defaultReviewerModel,
-    reviewerProvider: state.providerOverride ?? defaults.defaultReviewerProvider,
+    reviewerModel: identity.model,
+    reviewerProvider: identity.provider,
+    reviewerEngine: identity.engine,
+    jevSelectable: defaults.defaultJevPermitted,
   }
 }
 
@@ -561,6 +610,8 @@ export function createAuditProjection(defaults: AuditFoldDefaults & {
   readonly breakerTrips: (state: AuditState) => boolean
   readonly defaultReviewerModel: string
   readonly defaultReviewerProvider: string
+  readonly defaultReviewerEngine: 'llm' | 'jev'
+  readonly defaultJevPermitted: boolean
 }): WiredProjectionDefinition<AuditProjectionKey> {
   const stateSchema = z.object({
     records: z.array(z.any()),
@@ -571,6 +622,7 @@ export function createAuditProjection(defaults: AuditFoldDefaults & {
     enabledOverride: z.boolean().optional(),
     modelOverride: z.string().optional(),
     providerOverride: z.string().optional(),
+    engineOverride: z.string().optional(),
     reviewsThisTurn: z.number(),
     denialsStreak: z.number(),
     window: z.array(z.boolean()),
@@ -593,6 +645,8 @@ export function createAuditProjection(defaults: AuditFoldDefaults & {
         breakerTrips: defaults.breakerTrips(state),
         defaultReviewerModel: defaults.defaultReviewerModel,
         defaultReviewerProvider: defaults.defaultReviewerProvider,
+        defaultReviewerEngine: defaults.defaultReviewerEngine,
+        defaultJevPermitted: defaults.defaultJevPermitted,
       }),
     },
   }

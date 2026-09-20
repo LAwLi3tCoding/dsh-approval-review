@@ -8,6 +8,29 @@
 
 > **它只是换了"谁来审"，没有放宽任何权限。** 插件不会扩大沙箱、不会凭空发放授权，也不会把本该由人决定的事从人手里拿走。它不负责的请求一律通过 `next()` 原样交还给应答链。
 
+## 0.5：可选 Jev 复核引擎
+
+`reviewer.engine` 现在决定**由谁复核**：原有的 LLM 路由，或 [TypeSafe 的 Jev](https://docs.typesafe.ai/)（System One）。Jev 是决策模型——用类型化答案与概率作答、不写散文——因此一次复核就是一次 HTTP 调用，没有工具循环。在本插件自带的用例集上实测：约 0.9 s/次，而 LLM 复核为 4–12 s；策略结果 16/16 与预期一致。verdict 之后的一切——风险闸门、断路器、缓存、台账、审批页签——两个引擎共用。
+
+**使用 Jev 的步骤：**
+
+1. **存密钥**到 harness 能解析凭据的地方：harness 凭据设置，或 `$DSH_HOME/.env` 里的 `TYPESAFE_API_KEY=…`。插件先问凭据存储（它本身已按序叠好启动环境、托管存储与各层 `.env`），取不到再回落进程环境；并且**按次解析**，所以轮换密钥下一次裁决即生效，无需重启。
+
+2. **打开引擎**（写进你的 profile patch）。按 id 覆盖会整行替换 bundle 行的 config，所以要重述你仍需要的键：
+
+   ```yaml
+   - id: approval-review
+     config:
+       reviewer:
+         engine: jev
+         jev:
+           allowEgress: true
+   ```
+
+3. **重启** harness（引擎在挂载时读取），然后运行 `/approval-review status`。它会打印引擎、访问模式门控与模型，台账为空时总有可见原因。
+
+两条边界是有意为之：`allowEgress: true` 必须显式确认，因为 Jev 是第三方端点、证据包会离开本机；与当前引擎不匹配的选择会被记录而不是转发。在审批页签里可以任选某个 Jev 模型或某条 LLM 路由——选择自带引擎，且只对本会话生效。完整契约（含两个引擎各自的能与不能）见[复核引擎：`llm` 与 `jev`](#复核引擎llm-与-jev)。
+
 ## 能力一览
 
 | | |
@@ -74,7 +97,8 @@ dsh --profile <profile> --dump-config | grep -A6 'id: approval-review'
 | `reviewTools` | `['*']` | 默认复核所有工具的审批请求。 |
 | `defaultPolicy` | `ai` | 未匹配工具的默认策略。 |
 | `rules` | `[]` | 有序的 `{pattern, policy, field?, note?}` 正则规则，优先于工具表求值。`field` 可为 `reason`（默认）、`toolName`、`arguments`。 |
-| `reviewer.mode` | `direct` | 默认独立模型调用，不继承父会话提示词、历史、skills 或记忆；可选 `subagent` 读取工作区。 |
+| `reviewer.engine` | `llm` | 复核引擎：默认原有 LLM 复核，或 TypeSafe 的 Jev。见[复核引擎：llm 与 jev](#复核引擎llm-与-jev)。 |
+| `reviewer.mode` | `direct` | 默认独立模型调用，不继承父会话提示词、历史、skills 或记忆；可选 `subagent` 读取工作区。仅适用于 `engine: llm`。 |
 | `reviewer.provider` / `.model` | *(继承)* | 复核路由；不填则继承调用 Agent 自己的路由。会话内可用 `/approval-review model [<provider>/]<id>` 覆盖（**「审批」页签右上角可以直接选**：点开即列出本机配置的模型，候选来自客户端自己的模型目录服务 `modelDirectories`——和 `/model` 选择器、输入框里的模型座位读的是同一份目录。列表由插件自己渲染（原生 `datalist`/`select` 的弹层字号字重无法用 CSS 控制，会显得比页面吵），支持输入过滤、方向键+回车，也可以手打目录里没有的 id）。 |
 | `reviewer.subagentProvider` | `spawn` | 可选子代理后端；`spawn` 不复制父会话历史，但仍继承宿主 preset。 |
 | `reviewer.inspectLocalState` | `true` | 为 direct 模式启用受限本地只读检查。 |
@@ -109,6 +133,70 @@ dsh --profile <profile> --dump-config | grep -A6 'id: approval-review'
 | `feedReasonToModel` | `true` | 是否把理由追加到被拒的工具结果。 |
 | `recordAllowedVerdicts` | `true` | 是否把**放行**裁决也追加到被接受的工具结果。关掉后页签只显示"放行了"、不显示理由；打开的成本是每次自动放行多一小段标记进入模型上下文。 |
 | `language` | `auto` | 插件对外输出的**散文语言**——`/approval-review` 的命令输出，以及复核模型的 `reason`/`suggestion` 两个字段。`auto` 跟随 DSH 语言设置（设置 → 通用 → 语言），`en`/`zh` 强制指定。每次调用时解析，切换后下一条命令、下一次裁决即生效。边界：`decision`/`risk` 等枚举值始终是英文 token（解析器按英文校验），已写入转录的文本（旧裁决的理由、旧命令输出）不会被改写。 |
+
+### 复核引擎：`llm` 与 `jev`
+
+`reviewer.engine` 决定由谁复核。`llm`（默认）是原有路径：一次模型调用（或只读子代理）读证据包并返回裁决 JSON。`jev` 把同一份证据包 POST 到 [TypeSafe 的 System One 端点](https://docs.typesafe.ai/api)，读回类型化答案，判定（禁令命中、不确定、范围是否有界）由代码做出。verdict 之后的一切——风险闸门、断路器、缓存、台账、审批卡片——两个引擎共用。
+
+Jev 不经过 DSH 的模型路由：它是一次带 Bearer 密钥的直连 HTTP 调用，因此不出现在模型选择器里，也不需要注册 provider。台账里的 `typesafe/<model>` 是插件为自己审计记录合成的标签，不是 DSH 路由；`/approval-review model <id>` 仍然有效，覆盖的就是发给 TypeSafe 的模型名或版本。
+
+选择器里的每一项**自带引擎**：`typesafe/<model>` 用 Jev 复核，`<provider>/<model>` 用该 LLM 路由复核，裸 `<model>` 保持当前引擎只换模型，`default` 回到部署自己的复核者。这才让列表里每一行都有意义——包括把 Jev 部署临时切回某条 LLM 路由，表头与台账都会跟着变。两条边界仍然生效：只有在部署确认过出境（`jev.allowEgress`）时会话才能切到 Jev；Jev 端点收到的是裸模型名，因此去掉 `typesafe/` 标记后仍含 `/` 的值会被记录并忽略，而不是转发出去。
+
+| 键 | 默认值 | 含义 |
+|---|---|---|
+| `reviewer.jev.endpoint` | `https://api.typesafe.ai/v1/systemone` | 证据包的 POST 目标。若不允许直接出境，指向自建网关。 |
+| `reviewer.jev.model` | `jev-latest` | 模型名或别名。响应会回报实际作答的版本（如 `jev-1.13.0`），台账记录的是该版本。 |
+| `reviewer.jev.apiKeyEnv` | `TYPESAFE_API_KEY` | 存放密钥的环境变量名。密钥不从配置读取、不进日志、不写入审批记录。 |
+| `reviewer.jev.timeoutMs` | `8000` | 单次 HTTP 调用的硬超时，独立于 `reviewer.timeoutMs`。 |
+| `reviewer.jev.permitProbMin` | `0.6` | permit 答案的最高概率低于此值即判为 `uncertain`。 |
+| `reviewer.jev.prohibitedAt` | `0.5` | 四条禁令任一达到此概率即直接否决，不考虑授权等级。刻意不对称：误拒的代价低于误放。 |
+| `reviewer.jev.scopeBoundedAt` | `0.5` | 范围问题达到此概率才算「有界」。 |
+| `reviewer.jev.allowEgress` | `false` | 必须显式置 `true` 才能挂载，否则加载期失败，并在错误信息里写明证据会发往哪个端点。 |
+| `reviewer.jev.rubric` | `{}` | 按问题 id 覆盖 `instructions`（问题 id 见 `src/jev-questions.ts`）。 |
+
+实际差异：
+
+- **一次复核一次 HTTP 调用，没有工具循环。** Jev 无法检查本地状态，决定性事实不在证据里时只能判为 `uncertain` 并走 `onUncertain`（出厂设置是转人工），而不是自行取证。`reviewer.mode` 与 `reviewer.inspectLocalState` 对它不生效。
+- **`reason` 由代码从答案拼装**，例如
+  `Denied: prohibition "disclosure of secrets or private data" (0.97); risk critical; authorization unknown; permit 1.00`，
+  并按配置的输出语言本地化。`reviewer.policyText` 对它不生效：裁决策略写在逐题 rubric 里。
+- **证据包会离开本机**，这正是 `allowEgress` 所确认的事。脱敏逻辑不变（按 key 名匹配，外加对不可解析载荷的兜底），它不会从自由文本里清理密钥。
+- **配置错误在加载期失败**（Jev 配 `mode: subagent`、端点不是 https、未确认出境），而不是等到第一次审批时才表现为「转人工」。
+- **密钥先经 harness 凭据存储解析，其次才是环境变量。** 存进凭据设置、写进 `$DSH_HOME/.env`，或者启动前导出都可以：凭据接缝本身已把这几层按序叠好（启动环境 → 托管存储 → 项目 `.env` → harness home `.env`），并按次解析，所以轮换密钥无需重启。GUI 启动的 harness 不会执行你的 shell 启动文件，这正是"存进凭据"比 `~/.zshenv` 有效的原因。
+
+没有配置 Jev、或只配了一半时会怎样：
+
+| 状态 | 结果 |
+|---|---|
+| `reviewer.engine` 保持 `llm`（默认） | 走 LLM 复核。不会有请求发往 TypeSafe，不需要密钥，也不会打 Jev 相关警告。 |
+| `engine: jev` 但没写 `jev.allowEgress: true` | 拒绝挂载，错误信息点明证据会发往哪个端点；不会有任何自动复核。 |
+| `engine: jev`、已确认出境，但凭据存储与环境都解析不到密钥 | 未挂载凭据存储时启动即打警告；挂了存储时则第一次复核以「缺少凭据」失败。两种情况都按 `onReviewerFailure` 处理——默认 `delegate`，请求转人工而不是被静默放行。失败达到 `maxFailuresPerTurn` 后本回合不再询问复核器。 |
+| `engine: jev` 配 `mode: subagent`，或端点不是 https | 拒绝挂载。 |
+| 密钥无效（`401`/`403`）、限流（`429`）、`5xx`、超时、非 JSON、答案缺字段 | 记为复核失败；不重试，也不采纳残缺答案。 |
+| 会话当前访问模式不是 `reviewerPreset` | 插件按设计不认领任何请求——台账保持为空，`/approval-review status` 会点名门控。 |
+
+#### 新装用户启用 Jev
+
+1. **存密钥**到 harness 能解析的地方：harness 凭据设置，或 `$DSH_HOME/.env` 里的 `TYPESAFE_API_KEY=…`。两者都按次读取；`process.env` 是不挂凭据行的部署的兜底。
+2. **打开引擎**（写进你的 profile patch）。按 id 覆盖会整行替换 bundle 行的 config，所以要重述你仍需要的键：
+
+   ```yaml
+   - id: approval-review
+     config:
+       reviewer:
+         engine: jev
+         jev:
+           allowEgress: true
+   ```
+
+3. **重启** harness（引擎在挂载时读取），然后运行 `/approval-review status`：它会打印引擎、门控与模型，台账为空时总有可见原因。
+
+启用前先验证连通性——该探针只发送合成证据，不发送仓库内容：
+
+```bash
+export TYPESAFE_API_KEY=…     # 与插件复核时解析到的是同一个密钥
+npx vitest run tests/jev-live.test.ts tests/jev-policy-live.test.ts
+```
 
 ### 三种工具策略
 

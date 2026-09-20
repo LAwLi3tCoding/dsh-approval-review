@@ -50,4 +50,16 @@ export interface ClientAuditView {
   readonly reviewerModel: string
   /** Provider half of the effective reviewer route; `''` means the inherited one. */
   readonly reviewerProvider: string
+  /**
+   * Engine that answers IN THIS SESSION: the deployment's choice, unless a
+   * selection from the picker switched it. Absent on an older host, which this
+   * client reads as `llm`.
+   */
+  readonly reviewerEngine?: 'llm' | 'jev'
+  /**
+   * Whether the picker may offer Jev models at all — the deployment acknowledged
+   * that evidence leaves the machine. This is not engine-dependent: choosing a Jev
+   * row is exactly how a session switches to Jev.
+   */
+  readonly jevSelectable?: boolean
 }

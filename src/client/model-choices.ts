@@ -16,6 +16,8 @@
  * @module dsh-approval-review/client/model-choices
  */
 
+import { JEV_ROUTE_PROVIDER } from '../model-override.ts'
+
 /** One `{provider, model}` route, when both halves are strings. */
 function routeOf(value: unknown): string | undefined {
   if (typeof value !== 'object' || value === null) return undefined
@@ -135,4 +137,39 @@ export function filterRoutes(routes: readonly string[], query: string): readonly
   const needle = query.trim().toLowerCase()
   if (needle.length === 0) return routes
   return routes.filter(route => route.toLowerCase().includes(needle))
+}
+
+/**
+ * Jev model names the picker offers while the Jev engine is in force.
+ *
+ * Under `reviewer.engine: jev` this string is sent as the request's `model`
+ * field, so these are the values that endpoint accepts; an LLM route id would be
+ * rejected upstream.
+ */
+export const JEV_MODEL_CHOICES: readonly string[] = [
+  `${JEV_ROUTE_PROVIDER}/jev-latest`,
+  `${JEV_ROUTE_PROVIDER}/jev-preview`,
+  `${JEV_ROUTE_PROVIDER}/jev-1.13.0`,
+]
+
+/**
+ * The candidate list for the reviewer-model picker.
+ *
+ * One list spans both engines, and every row is a reviewer the session can
+ * actually switch to: `provider/model` selects the LLM engine on that route, and
+ * `typesafe/<model>` selects Jev. That is why the Jev rows carry their provider —
+ * a bare model name only replaces a model on whatever engine is already in force,
+ * which is how a listed row could be chosen and then visibly do nothing.
+ * @param jevSelectable - whether the deployment acknowledged Jev egress; without
+ * it a session may not switch to Jev, so those rows are not offered.
+ * @param llmChoices - the LLM routes and the route in force, as the card sees them.
+ * @returns distinct candidates, Jev models first when they are permitted.
+ */
+export function reviewerModelChoices(jevSelectable: boolean, llmChoices: readonly string[]): readonly string[] {
+  const out: string[] = jevSelectable ? [...JEV_MODEL_CHOICES] : []
+  const push = (value: string): void => {
+    if (value.length > 0 && !out.includes(value)) out.push(value)
+  }
+  for (const route of llmChoices) push(route)
+  return out
 }

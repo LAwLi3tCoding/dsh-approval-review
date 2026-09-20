@@ -32,6 +32,14 @@ export interface SessionState {
   reviewsThisTurn: number
   /** Reviewer failures already spent in {@link turn}. */
   failuresThisTurn: number
+  /**
+   * Why requests were left to the human chain in {@link turn}, by reason code.
+   *
+   * A ledger row that carries no rationale has two very different causes — the
+   * reviewer never saw the request, or it saw it and declined to decide — and the
+   * difference used to be visible only in a log an operator cannot reach.
+   */
+  delegationsThisTurn: Record<string, number>
   /** Consecutive refusals, reset by any approval or a new turn. */
   denialsStreak: number
   /** Rolling refusal window, newest last, bounded by the configured size. */
@@ -66,6 +74,7 @@ export function createSessionState(): SessionState {
     turn: -1,
     reviewsThisTurn: 0,
     failuresThisTurn: 0,
+    delegationsThisTurn: {},
     denialsStreak: 0,
     window: [],
     circuitTripped: false,
@@ -109,6 +118,7 @@ export class ReviewSessions {
         state.turn = turn
         state.reviewsThisTurn = 0
         state.failuresThisTurn = 0
+        state.delegationsThisTurn = {}
         state.denialsStreak = 0
         state.window = []
         state.circuitTripped = false
@@ -203,6 +213,27 @@ export class ReviewSessions {
   /** Reviewer failures recorded in the open turn. */
   failuresThisTurn(session: Session): number {
     return this.stateOf(session).failuresThisTurn
+  }
+
+  /**
+   * Record that a request was handed to the rest of the answerer chain, and why.
+   * @param session - the session the request belongs to.
+   * @param code - short reason code (`no-call-id`, `preset`, `policy-human`, …).
+   */
+  noteDelegation(session: Session, code: string): void {
+    const state = this.stateOf(session)
+    state.delegationsThisTurn[code] = (state.delegationsThisTurn[code] ?? 0) + 1
+  }
+
+  /**
+   * Delegation reasons recorded in the open turn, most frequent first.
+   * @param session - the session to report on.
+   * @returns one `code×count` label per distinct reason.
+   */
+  delegations(session: Session): readonly string[] {
+    return Object.entries(this.stateOf(session).delegationsThisTurn)
+      .sort((left, right) => right[1] - left[1])
+      .map(([code, count]) => `${code}×${count}`)
   }
 
   /**

@@ -9,7 +9,14 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { directoryRoutes, filterRoutes, reviewerRouteChoices, routesFromDirectory } from '../src/client/model-choices.ts'
+import {
+  directoryRoutes,
+  filterRoutes,
+  JEV_MODEL_CHOICES,
+  reviewerModelChoices,
+  reviewerRouteChoices,
+  routesFromDirectory,
+} from '../src/client/model-choices.ts'
 
 describe('reviewerRouteChoices', () => {
   it('lists the override in force first, then the session model, then allowed routes', () => {
@@ -148,5 +155,40 @@ describe('directoryRoutes', () => {
   it('degrades to an empty pair for an unloaded directory', () => {
     expect(directoryRoutes(undefined)).toEqual({ routes: [], labels: {} })
     expect(directoryRoutes({ status: 'loading' })).toEqual({ routes: [], labels: {} })
+  })
+})
+
+describe('reviewerModelChoices', () => {
+  const llmRoutes = ['mtfriday/deepseek-v4-flash', 'deepseek-official/deepseek-flash']
+
+  it('offers only LLM routes when the deployment never permitted Jev', () => {
+    // Egress consent is the deployment's, so a session cannot be offered a row
+    // that would switch to an engine the deployment has not acknowledged.
+    expect(reviewerModelChoices(false, llmRoutes)).toEqual(llmRoutes)
+  })
+
+  it('offers the Jev models first when the deployment permits them', () => {
+    const choices = reviewerModelChoices(true, llmRoutes)
+    expect(choices.slice(0, JEV_MODEL_CHOICES.length)).toEqual(JEV_MODEL_CHOICES)
+  })
+
+  it('qualifies every Jev row with its engine marker', () => {
+    // A bare model name only replaces a model on the engine already in force,
+    // which is how a listed row could be chosen and then visibly do nothing.
+    for (const row of JEV_MODEL_CHOICES) expect(row.startsWith('typesafe/')).toBe(true)
+  })
+
+  it('keeps every LLM route reachable alongside them', () => {
+    const choices = reviewerModelChoices(true, llmRoutes)
+    for (const route of llmRoutes) expect(choices).toContain(route)
+  })
+
+  it('de-duplicates a route that appears in the card and in the catalog', () => {
+    const choices = reviewerModelChoices(true, ['typesafe/jev-latest', ...llmRoutes])
+    expect(choices.filter(entry => entry === 'typesafe/jev-latest')).toHaveLength(1)
+  })
+
+  it('works when the deployment publishes no LLM catalog at all', () => {
+    expect(reviewerModelChoices(true, [])).toEqual(JEV_MODEL_CHOICES)
   })
 })

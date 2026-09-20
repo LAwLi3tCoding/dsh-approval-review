@@ -8,6 +8,7 @@
 import Schema from '@deepseek-ai/schemastery'
 import type { RiskLevel, ToolPolicy } from './review-types.ts'
 import { RISK_LEVELS } from './review-types.ts'
+import { JEV_ALL_QUESTION_IDS } from './jev-questions.ts'
 
 /** How the plugin reacts to a reviewer verdict that exceeds the risk threshold. */
 export type RiskGateAction = 'allow' | 'delegate' | 'deny'
@@ -40,7 +41,48 @@ export interface RiskRuleConfig {
 /** How the reviewer is run. */
 export type ReviewerMode = 'subagent' | 'direct'
 
+/**
+ * Which engine answers the review.
+ *
+ * `llm` is the original path: a model call (or a read-only subagent) reads the
+ * evidence packet and returns the verdict JSON. `jev` posts the same evidence to
+ * TypeSafe's System One endpoint and reads typed answers back, with the decision
+ * thresholds applied in code. The engine is chosen once per mount; the two never
+ * mix, and every consumer downstream of the verdict is engine-agnostic.
+ */
+export type ReviewerEngine = 'llm' | 'jev'
+
+/** TypeSafe (Jev) engine settings; inert unless `reviewer.engine: jev`. */
+export interface JevConfig {
+  /** Full URL of the System One evaluation endpoint. */
+  readonly endpoint: string
+  /** Model name or alias sent in the request (`jev-latest` follows upstream releases). */
+  readonly model: string
+  /** Environment variable holding the API key; the key never comes from config. */
+  readonly apiKeyEnv: string
+  /** Hard deadline for the single HTTP call. */
+  readonly timeoutMs: number
+  /** Top probability below which the permit answer counts as uncertain. */
+  readonly permitProbMin: number
+  /** Probability at which a prohibition answer refuses the action outright. */
+  readonly prohibitedAt: number
+  /** Probability at which the scope answer counts as bounded. */
+  readonly scopeBoundedAt: number
+  /**
+   * Explicit acknowledgement that the evidence packet leaves this machine for
+   * {@link endpoint}. Load fails while this is false, because a deployment that
+   * turns the engine on should have decided that question on purpose.
+   */
+  readonly allowEgress: boolean
+  /** Per-question instruction overrides, keyed by a question id from `jev-questions.ts`. */
+  readonly rubric: Record<string, string>
+}
+
 export interface ReviewerConfig {
+  /** Which engine answers: the LLM path or TypeSafe's Jev. */
+  readonly engine: ReviewerEngine
+  /** Jev settings; inert unless {@link engine} is `jev`. */
+  readonly jev: JevConfig
   /** `subagent` runs a read-only child; `direct` makes one plain model call. */
   readonly mode: ReviewerMode
   /** Provider route for the reviewer; unset inherits the calling agent's provider. */
@@ -194,6 +236,10 @@ export interface Config {
 }
 
 const REVIEWER_MODES: readonly ReviewerMode[] = ['subagent', 'direct']
+const REVIEWER_ENGINES: readonly ReviewerEngine[] = ['llm', 'jev']
+
+/** The upstream endpoint, used when a deployment does not override it. */
+export const DEFAULT_JEV_ENDPOINT = 'https://api.typesafe.ai/v1/systemone'
 const TOOL_POLICIES: readonly ToolPolicy[] = ['ai', 'human', 'never']
 const RISK_GATE_ACTIONS: readonly RiskGateAction[] = ['allow', 'delegate', 'deny']
 const UNCERTAINTY_ACTIONS: readonly UncertaintyAction[] = ['delegate', 'allow', 'deny']
@@ -228,11 +274,54 @@ export const Config: Schema<Config> = Schema.object({
   })).default([]).description('Ordered regex rules evaluated before the tool table.'),
 
   reviewer: Schema.object({
+    engine: Schema.union(REVIEWER_ENGINES).default('llm').description(
+      'Which engine answers a review. `llm` (default) keeps the original path: a model call or a '
+      + 'read-only subagent reads the evidence and returns the verdict JSON. `jev` posts the same '
+      + 'evidence to TypeSafe System One and applies the decision thresholds in code; it is a single '
+      + 'HTTP call with no local inspection, so evidence gaps become `uncertain` instead of being '
+      + 'investigated. Switching engines changes nothing downstream of the verdict.',
+    ),
     // eslint-disable-next-line
     mode: Schema.union(REVIEWER_MODES).default('direct').description(
       'How the reviewer runs: `subagent` starts a read-only child that can inspect the '
-      + 'workspace; `direct` makes one plain model call with the evidence packet only.',
+      + 'workspace; `direct` makes one plain model call with the evidence packet only. '
+      + 'Applies to `engine: llm` only.',
     ),
+    jev: Schema.object({
+      endpoint: Schema.string().default(DEFAULT_JEV_ENDPOINT)
+        .description('System One evaluation endpoint. Evidence is POSTed here, so a deployment may '
+          + 'point it at its own gateway.'),
+      model: Schema.string().default('jev-latest')
+        .description('Model or alias sent in the request. `jev-latest` follows upstream releases; '
+          + 'pin a versioned id (for example `jev-1.13.0`) when thresholds were tuned against it.'),
+      apiKeyEnv: Schema.string().default('TYPESAFE_API_KEY')
+        .description('Environment variable holding the API key. The key is never read from this '
+          + 'config, never logged, and never written into the audit record.'),
+      timeoutMs: Schema.number().step(1).min(1000).default(8000)
+        .description('Hard deadline for the single Jev call; independent of `reviewer.timeoutMs`, '
+          + 'which bounds the multi-round LLM reviewer.'),
+      permitProbMin: Schema.number().min(0).max(1).default(0.6)
+        .description('Top probability below which the permit answer counts as `uncertain`. The '
+          + 'upstream consistency cookbook uses 0.60; retune from real samples before relying on it.'),
+      prohibitedAt: Schema.number().min(0).max(1).default(0.5)
+        .description('Probability at which any prohibition answer refuses the action outright, '
+          + 'regardless of authorization. Deliberately asymmetric: a false refusal is cheaper than '
+          + 'a false allow.'),
+      scopeBoundedAt: Schema.number().min(0).max(1).default(0.5)
+        .description('Probability at which the scope answer counts as bounded. High-risk actions '
+          + 'need a bounded scope to be auto-allowed.'),
+      reasonSourceNote: undefined,
+      allowEgress: Schema.boolean().default(false).description(
+        'Explicit acknowledgement that the evidence packet leaves this machine for `endpoint`. '
+        + 'Loading fails while this is false, so enabling the engine is a deliberate act.',
+      ),
+      rubric: Schema.dict(Schema.string()).default({}).description(
+        'Per-question instruction overrides, keyed by question id (see `src/jev-questions.ts`). '
+        + 'Use it for deployment-specific wording; the option definitions stay in code.',
+      ),
+    // @ts-expect-error Schemastery cannot express "every field has its own default",
+    // so `{}` is the correct seed even though the type demands the filled shape.
+    }).default({}),
     provider: Schema.string().description('Reviewer provider route; unset inherits the calling agent.'),
     model: Schema.string().description('Reviewer model id; unset inherits the calling agent.'),
     inspectLocalState: Schema.boolean().default(true).description('Allow up to four bounded read-only local inspections in direct mode; no shell, writes or network.'),
@@ -457,4 +546,74 @@ export function applyVerdictGates(
     }
   }
   return { action: 'allow', note: `risk ${verdict.risk} within \`maxAutoAllowRisk\`` }
+}
+
+/** Load-time findings for the selected reviewer engine. */
+export interface ReviewerEngineProblems {
+  /** Fatal: the plugin must not mount with these. */
+  readonly errors: readonly string[]
+  /** Non-fatal: logged so an operator is not surprised by a key that does nothing. */
+  readonly warnings: readonly string[]
+}
+
+/**
+ * Validate the engine selection without touching the network or the filesystem.
+ *
+ * Kept pure so the decision table is testable, and called from `apply` so a
+ * misconfiguration fails at load rather than at the first approval — the moment
+ * a bad reviewer would otherwise silently hand work to the human chain.
+ * @param config - validated plugin configuration.
+ * @returns the fatal errors and the inert-key warnings.
+ */
+export function validateReviewerEngine(config: Config): ReviewerEngineProblems {
+  const errors: string[] = []
+  const warnings: string[] = []
+  if (config.reviewer.engine !== 'jev') return { errors, warnings }
+  const jev = config.reviewer.jev
+
+  if (config.reviewer.mode === 'subagent') {
+    errors.push('reviewer.engine is "jev" while reviewer.mode is "subagent": the Jev engine makes one '
+      + 'HTTP call and cannot run a subagent. Set reviewer.mode to "direct", or switch reviewer.engine back to "llm".')
+  }
+  if (!jev.allowEgress) {
+    errors.push(`reviewer.engine is "jev" and reviewer.jev.allowEgress is false. Enabling the engine sends the `
+      + `reviewed evidence (tool arguments, transcript, selected user intent) to ${jev.endpoint}. `
+      + 'Set reviewer.jev.allowEgress: true to acknowledge that, or point reviewer.jev.endpoint at your own gateway.')
+  }
+  if (jev.apiKeyEnv.trim().length === 0) {
+    errors.push('reviewer.jev.apiKeyEnv is empty: the API key is read from the environment variable it names.')
+  }
+  try {
+    const url = new URL(jev.endpoint)
+    const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1'
+    if (url.protocol !== 'https:' && !loopback) {
+      errors.push(`reviewer.jev.endpoint must use https (got "${jev.endpoint}"), unless it points at a loopback address.`)
+    }
+  } catch {
+    errors.push(`reviewer.jev.endpoint is not a valid URL: ${jev.endpoint}`)
+  }
+
+  if (config.reviewer.maxTokens !== undefined) {
+    warnings.push('reviewer.maxTokens has no effect with engine "jev": there is no token stream to cap.')
+  }
+  if (config.reviewer.policyText !== undefined) {
+    warnings.push('reviewer.policyText has no effect with engine "jev": the ruling policy lives in the '
+      + 'per-question rubric. Use reviewer.jev.rubric for deployment wording.')
+  }
+  if (config.reviewer.guidance !== undefined) {
+    warnings.push('reviewer.guidance has no effect with engine "jev": put deployment wording in reviewer.jev.rubric instead.')
+  }
+  if (config.reviewer.temperature !== 0) {
+    warnings.push('reviewer.temperature has no effect with engine "jev".')
+  }
+  if (config.reviewer.inspectLocalState) {
+    warnings.push('reviewer.inspectLocalState is ignored with engine "jev": Jev reads the evidence packet only, '
+      + 'so a request that needs local facts becomes `uncertain` and follows `onUncertain` instead of being investigated.')
+  }
+  const unknown = Object.keys(jev.rubric).filter(id => !JEV_ALL_QUESTION_IDS.includes(id))
+  if (unknown.length > 0) {
+    warnings.push(`reviewer.jev.rubric has unknown question id(s): ${unknown.join(', ')}. `
+      + `Valid ids: ${JEV_ALL_QUESTION_IDS.join(', ')}.`)
+  }
+  return { errors, warnings }
 }

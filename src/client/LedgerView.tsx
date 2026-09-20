@@ -20,6 +20,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { ClientAuditRecord, ClientAuditView, ClientRisk } from './types.ts'
 import { resetScrollableAncestorToTop } from './scroll.ts'
+import { reviewerModelChoices } from './model-choices.ts'
 import { ModelPicker } from './ModelPicker.tsx'
 import type { ApprovalReviewTranslate } from './locale.ts'
 
@@ -290,6 +291,11 @@ export function LedgerView({ view, t, runCommand, modelChoices, loadModelRoutes 
   // The base list (override in force + session model) paints immediately; the
   // catalog replaces it once loaded, so the picker is never empty in between.
   const choices = loadedChoices ?? modelChoices ?? []
+  // One list, two engines: every row is a reviewer this session can switch to, so
+  // the Jev rows are offered whenever the deployment permitted Jev at all — not
+  // only while Jev happens to be the engine in force. The offer never moves with
+  // the current selection.
+  const pickerChoices = reviewerModelChoices(view?.jevSelectable === true, choices)
   const records = view?.records ?? []
   const denials = useMemo(() => records.filter(r => r.refused), [records])
   const reviewedCount = useMemo(() => records.filter(r => r.policy === 'ai').length, [records])
@@ -331,7 +337,7 @@ export function LedgerView({ view, t, runCommand, modelChoices, loadModelRoutes 
         {runCommand === undefined ? null : (
           <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
             <ModelPicker
-              choices={choices}
+              choices={pickerChoices}
               labels={modelLabels}
               runCommand={run}
               loadModelRoutes={loadModelRoutes}
