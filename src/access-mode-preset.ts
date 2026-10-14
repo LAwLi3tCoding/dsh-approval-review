@@ -183,11 +183,6 @@ function declaresShippedPreset(config: Record<string, unknown> | undefined, key:
   return isDeepStrictEqual(presetsOf(config)[key], { ...SHIPPED_PRESET })
 }
 
-/** The logger this plugin writes its own diagnostics under. */
-function loggerOf(ctx: Context): Logger {
-  return ctx.logger('dsh-approval-review')
-}
-
 /** Structural read of an optional service, so this package needs no type outlet for it. */
 function serviceOf<T>(ctx: Context, name: string): T | undefined {
   const lookup = ctx as unknown as { get(key: string): unknown }
@@ -205,6 +200,17 @@ export function readPermissionPresets(ctx: Context): PermissionPresetsLike | und
 }
 
 /**
+ * Delays before each cleanup attempt, in milliseconds.
+ *
+ * The first one is deliberately not zero: an uninstall holds the HMR transaction
+ * that is tearing this plugin down, and `configEditor.edit()` refuses to run
+ * inside one — the first live uninstall failed with exactly "HMR transactions
+ * cannot be nested". The later entries retry a write that is still contending
+ * with the reload it is part of.
+ */
+export const CLEANUP_DELAYS_MS: readonly number[] = [250, 1000, 3000]
+
+/**
  * Keep this plugin's access-mode entry present while it is installed, and gone
  * once it is not.
  *
@@ -218,19 +224,30 @@ export class AccessModePreset {
   private observed: AccessModeState = { kind: 'service-missing' }
   /** Whether the profile patch currently holds an entry this plugin may remove. */
   private owned = false
-  /** Pending uninstall re-checks, so a shutdown does not tear them down early. */
+  /** Pending cleanup attempts, held so a GC pass cannot drop a scheduled timer. */
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
   /** Set once the plugin is unmounting, so a late `attach()` cannot re-write config. */
   private stopped = false
+  /** Why the last cleanup attempt failed, reported once the attempts run out. */
+  private lastError: unknown
+  /**
+   * This plugin's own logger, captured at construction: the deferred cleanup runs
+   * after the mounting context is disposed, and reporting must not depend on it.
+   */
+  private readonly log: Logger
 
   /**
-   * @param ctx - the mounting context, used for logging and further lookups.
+   * @param ctx - the mounting context, used for service lookups.
    * @param config - validated plugin configuration.
+   * @param cleanupDelaysMs - delay before each cleanup attempt; tests shorten it.
    */
   constructor(
     private readonly ctx: Context,
     private readonly config: Config,
-  ) {}
+    private readonly cleanupDelaysMs: readonly number[] = CLEANUP_DELAYS_MS,
+  ) {
+    this.log = ctx.logger('dsh-approval-review')
+  }
 
   /** The gate key this deployment configured; empty means "any access mode". */
   private get key(): string {
@@ -290,7 +307,7 @@ export class AccessModePreset {
       this.owned = true
       this.observed = { kind: 'adopted' }
       if (!present) {
-        loggerOf(this.ctx).warn(
+        this.log.warn(
           `the profile patch declares preset "${key}" but the access-mode catalog does not offer it; `
           + 'the plugin will claim nothing until it does',
         )
@@ -346,22 +363,29 @@ export class AccessModePreset {
     }
     this.owned = true
     this.observed = { kind: 'written' }
-    loggerOf(this.ctx).info(
+    this.log.info(
       `access mode "${key}" was missing from the catalog — most likely a later \`permission\` override `
       + `replaced the row this package ships. Wrote it into the profile patch (manageAccessModePreset).`,
     )
   }
 
   /**
-   * Remove the entry this plugin owns, but only when the bundle really is gone.
+   * Remove the entry this plugin owns — after the unmount that triggered it.
    *
    * Unmount also happens on app shutdown and on every config reload, and removing
    * the entry then would delete the menu option on a normal exit. The signal used
    * is the profile's own bundle list: the plugin manager removes the package from
    * `dsh.profile.bundles` before it reconciles the tree, so a missing entry means
-   * uninstall. Because that write and this unmount race, the check is repeated a
-   * few times; a shutdown (bundle still listed) keeps the entry, and the next
-   * mount re-adopts it.
+   * uninstall.
+   *
+   * The write CANNOT run inside this call. An uninstall holds the HMR transaction
+   * that is tearing this plugin down, and `configEditor.edit()` takes that same
+   * lock (`hmr.runExclusive`), which fails with "HMR transactions cannot be
+   * nested" — the first live uninstall hit exactly that and left the entry
+   * behind. The removal is therefore scheduled on a plain timer, outside the
+   * transaction, and retried while the reload it belongs to still contends for
+   * the lock. A normal exit (bundle still listed) keeps the entry, and the next
+   * mount adopts it again.
    */
   async detach(): Promise<void> {
     try {
@@ -375,47 +399,57 @@ export class AccessModePreset {
   private async detachChecked(): Promise<void> {
     this.stopped = true
     if (!this.owned) return
-    if (await this.bundleStillInstalled()) {
-      loggerOf(this.ctx).debug(
-        `keeping access-mode preset "${this.key}": the profile still lists ${PACKAGE_NAME}`,
-      )
-      this.retryAfterUninstall()
+    // Capture the editor NOW: the mounting context is being disposed, so the
+    // deferred attempts must not look the service up again.
+    const editor = this.editor()
+    if (editor === undefined) {
+      this.warnOrphan(new Error('no configEditor service to write through'))
       return
     }
-    await this.remove()
+    this.scheduleCleanup(editor, 0)
   }
 
   /**
-   * Re-check a few times for an uninstall whose bundle-list write lands after the
-   * unmount that it triggers. Deliberately plain timers: the plugin's own context
-   * is being disposed, so a context-owned timer would never fire.
+   * One deferred cleanup attempt, with retries.
+   * @param editor - the config editor captured before disposal.
+   * @param attempt - index into the configured delay list.
    */
-  private retryAfterUninstall(attempt = 0): void {
-    if (attempt >= 3) return
+  private scheduleCleanup(editor: ConfigEditorLike, attempt: number): void {
+    const delay = this.cleanupDelaysMs[attempt]
+    if (delay === undefined) {
+      this.warnOrphan(this.lastError)
+      return
+    }
     const timer = setTimeout(() => {
       this.timers.delete(timer)
       void (async () => {
-        if (await this.bundleStillInstalled()) {
-          this.retryAfterUninstall(attempt + 1)
-          return
+        try {
+          if (await this.bundleStillInstalled(editor)) {
+            this.log.debug(
+              `keeping access-mode preset "${this.key}": the profile still lists ${PACKAGE_NAME}`,
+            )
+            return
+          }
+          if (await this.tryRemove(editor)) return
+        } catch (error) {
+          this.lastError = error
         }
-        await this.remove()
+        this.scheduleCleanup(editor, attempt + 1)
       })()
-    }, 1000)
+    }, delay)
     this.timers.add(timer)
   }
 
-  /** Delete this plugin's preset from the profile patch, when it is still ours. */
-  private async remove(): Promise<void> {
-    const editor = this.editor()
-    if (editor === undefined) {
-      this.warnOrphan()
-      return
-    }
+  /**
+   * Delete this plugin's preset from the profile patch, when it is still ours.
+   * @param editor - the config editor captured before disposal.
+   * @returns true when there is nothing left to retry.
+   */
+  private async tryRemove(editor: ConfigEditorLike): Promise<boolean> {
     const entry = this.permissionEntry(editor)
     if (entry === undefined) {
-      this.warnOrphan()
-      return
+      this.warnOrphan(new Error(`no loader entry for "${PERMISSION_PRESETS_PACKAGE}"`))
+      return true
     }
     // Decide from the profile patch's OWN config before touching the loader: a
     // customized entry is somebody else's now, and an `edit` that changes
@@ -423,16 +457,16 @@ export class AccessModePreset {
     const row = this.configurationRow(editor)
     const overridePresets = presetsOf(row?.override)
     if (!isDeepStrictEqual(overridePresets[this.key], { ...SHIPPED_PRESET })) {
-      loggerOf(this.ctx).info(
+      this.log.info(
         `kept access mode "${this.key}": the profile patch no longer holds this package's definition`,
       )
-      return
+      return true
     }
     if (Object.keys(overridePresets).length <= 1) {
-      loggerOf(this.ctx).info(
+      this.log.info(
         `kept access mode "${this.key}": removing it would leave the permission row with no presets`,
       )
-      return
+      return true
     }
     try {
       await editor.edit(entry, current => {
@@ -443,19 +477,20 @@ export class AccessModePreset {
         delete presets[this.key]
         return { ...current, presets }
       })
-      this.owned = false
-      loggerOf(this.ctx).info(
-        `removed access mode "${this.key}" from the profile patch (${PACKAGE_NAME} is uninstalled)`,
-      )
     } catch (error) {
-      this.warnOrphan(error)
+      this.lastError = error
+      return false
     }
+    this.owned = false
+    this.log.info(
+      `removed access mode "${this.key}" from the profile patch (${PACKAGE_NAME} is uninstalled)`,
+    )
+    return true
   }
 
   /** Whether the profile's bundle list still includes this package. */
-  private async bundleStillInstalled(): Promise<boolean> {
-    const editor = this.editor()
-    const documentPath = editor?.documentPath
+  private async bundleStillInstalled(editor: ConfigEditorLike): Promise<boolean> {
+    const documentPath = editor.documentPath
     // No path to read: keep the entry. A leftover option is recoverable; a deleted
     // one on a normal exit is a support ticket.
     if (documentPath === undefined) return true
@@ -482,7 +517,7 @@ export class AccessModePreset {
     try {
       return declaresShippedPreset(this.configurationRow(editor)?.override, key)
     } catch (error) {
-      loggerOf(this.ctx).debug(
+      this.log.debug(
         `access-mode ownership could not be read: ${error instanceof Error ? error.message : String(error)}`,
       )
       return false
@@ -491,7 +526,7 @@ export class AccessModePreset {
 
   /** The warning for a gate key the catalog does not offer and this plugin cannot add. */
   private warnMissing(reason: string): void {
-    loggerOf(this.ctx).warn(
+    this.log.warn(
       `reviewerPreset "${this.key}" is missing from the access-mode catalog: ${reason}. `
       + 'Until that entry exists the plugin claims NOTHING and every approval goes to a human. '
       + 'An id-targeted `permission` override replaces the whole row config, which is what drops the '
@@ -503,7 +538,7 @@ export class AccessModePreset {
   /** The warning for an entry this plugin could not delete while unmounting. */
   private warnOrphan(error?: unknown): void {
     const detail = error === undefined ? '' : ` (${error instanceof Error ? error.message : String(error)})`
-    loggerOf(this.ctx).warn(
+    this.log.warn(
       `could not remove access-mode preset "${this.key}" from the profile patch${detail}. `
       + `It is a harmless leftover — with ${PACKAGE_NAME} gone nothing claims those requests and they `
       + 'go to a human prompt — but the menu still shows the entry. Delete that key from the '
@@ -515,7 +550,7 @@ export class AccessModePreset {
   private fail(what: string, error: unknown): void {
     const detail = error === undefined ? what : `${what}: ${error instanceof Error ? error.message : String(error)}`
     this.observed = { kind: 'failed', detail }
-    loggerOf(this.ctx).warn(`access-mode preset check failed — ${detail}`)
+    this.log.warn(`access-mode preset check failed — ${detail}`)
   }
 }
 

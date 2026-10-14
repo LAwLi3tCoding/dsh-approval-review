@@ -82,6 +82,8 @@ interface EditorCall {
 interface FakeEditor extends ConfigEditorLike {
   /** Every `edit()` call the plugin made. */
   readonly calls: EditorCall[]
+  /** How many `edit()` invocations were attempted, retries included. */
+  readonly attempts: number
   /** The row's live config. */
   config(): Record<string, unknown>
   /** Replace the row's live config, as another layer or a reload would. */
@@ -94,7 +96,8 @@ interface FakeEditor extends ConfigEditorLike {
  * A `configEditor` stand-in that keeps the row's config in memory and records
  * every write, which is what the assertions read.
  * @param options - the row's starting config, its profile-patch override, the
- *   patch path to report, and an optional failure to throw from `edit`.
+ *   patch path to report, an optional failure to throw from `edit`, and how many
+ *   leading `edit` calls should fail the way a nested HMR transaction does.
  * @returns the editor plus its recorded state.
  */
 function fakeEditor(options: {
@@ -102,13 +105,17 @@ function fakeEditor(options: {
   override?: Record<string, unknown>
   documentPath?: string
   fail?: Error
+  failFirst?: number
 } = {}): FakeEditor {
   const inherited = options.inherited ?? { presets: { ...BASE_PRESETS } }
   let current: Record<string, unknown> = inherited
   let override: Record<string, unknown> = options.override ?? {}
+  let failuresLeft = options.failFirst ?? 0
+  let attempts = 0
   const calls: EditorCall[] = []
   return {
     calls,
+    get attempts() { return attempts },
     config: () => current,
     setConfig: next => { current = next },
     setOverride: next => { override = next },
@@ -116,7 +123,13 @@ function fakeEditor(options: {
     configuration: () => [{ entry: PERMISSION_ENTRY, inherited, override }],
     ...options.documentPath === undefined ? {} : { documentPath: options.documentPath },
     async edit(_entry, change) {
+      attempts += 1
       if (options.fail !== undefined) throw options.fail
+      if (failuresLeft > 0) {
+        failuresLeft -= 1
+        // The exact rejection the first live uninstall hit.
+        throw new Error('HMR transactions cannot be nested')
+      }
       const next = change(current, inherited)
       calls.push({ next })
       current = next
@@ -155,6 +168,18 @@ function captureLogs(ctx: Context): string[] {
   return lines
 }
 
+/**
+ * Wait for the deferred cleanup attempts to finish.
+ *
+ * Removal is scheduled on plain timers, never inline: an uninstall holds the HMR
+ * transaction that is tearing the plugin down, and the profile write takes that
+ * same lock. The cases inject millisecond delays, so this settles at once.
+ * @returns a promise that resolves after the last attempt had time to run.
+ */
+const settle = (): Promise<void> => new Promise(resolve => {
+  setTimeout(resolve, 25)
+})
+
 /** Mount the owner with the services a case provides. */
 async function mounted(options: {
   config?: Record<string, unknown>
@@ -164,7 +189,7 @@ async function mounted(options: {
   const ctx = new Context()
   const logs = captureLogs(ctx)
   if (options.editor !== undefined) ctx.provide('configEditor', options.editor as never)
-  const owner = new AccessModePreset(ctx, configOf(options.config))
+  const owner = new AccessModePreset(ctx, configOf(options.config), [0, 1, 2])
   if (options.presets !== undefined) await owner.attach(options.presets)
   return { owner, ctx, logs }
 }
@@ -320,16 +345,58 @@ describe('uninstall cleanup', () => {
   it('removes the entry once the bundle is gone from the profile', async () => {
     const { owner, editor } = await adopted(['dsh-base', 'dsh-web-app'])
     await owner.detach()
+    await settle()
     expect(editor.calls).toHaveLength(1)
     const presets = presetsOfConfig(editor.config())
     expect(presets[SHIPPED_PRESET_KEY]).toBeUndefined()
     expect(Object.keys(presets)).toEqual([...BASE_KEYS])
   })
 
+  it('retries a write that a nested HMR transaction rejected', async () => {
+    const documentPath = await profileWith([])
+    const editor = fakeEditor({
+      documentPath,
+      override: { presets: { ...BASE_PRESETS, [SHIPPED_PRESET_KEY]: OWNED } },
+      inherited: { presets: { ...BASE_PRESETS, [SHIPPED_PRESET_KEY]: OWNED } },
+      failFirst: 1,
+    })
+    const { owner, logs } = await mounted({
+      presets: fakeCatalog([...BASE_KEYS, SHIPPED_PRESET_KEY]),
+      editor,
+    })
+    await owner.detach()
+    await settle()
+    expect(editor.attempts).toBe(2)
+    expect(presetsOfConfig(editor.config())[SHIPPED_PRESET_KEY]).toBeUndefined()
+    expect(logs.some(line => line.includes('removed access mode'))).toBe(true)
+    expect(logs.some(line => line.includes('could not remove'))).toBe(false)
+  })
+
+  it('reports the leftover when every attempt stays blocked', async () => {
+    const documentPath = await profileWith([])
+    const editor = fakeEditor({
+      documentPath,
+      override: { presets: { ...BASE_PRESETS, [SHIPPED_PRESET_KEY]: OWNED } },
+      inherited: { presets: { ...BASE_PRESETS, [SHIPPED_PRESET_KEY]: OWNED } },
+      failFirst: 3,
+    })
+    const { owner, logs } = await mounted({
+      presets: fakeCatalog([...BASE_KEYS, SHIPPED_PRESET_KEY]),
+      editor,
+    })
+    await owner.detach()
+    await settle()
+    expect(editor.attempts).toBe(3)
+    expect(presetsOfConfig(editor.config())[SHIPPED_PRESET_KEY]).toEqual(OWNED)
+    expect(logs.some(line => line.includes('could not remove access-mode preset'))).toBe(true)
+  })
+
   it('keeps the entry on a shutdown, where the bundle is still installed', async () => {
     const { owner, editor, logs } = await adopted(['dsh-base', PACKAGE_NAME])
     await owner.detach()
+    await settle()
     expect(editor.calls).toHaveLength(0)
+    expect(editor.attempts).toBe(0)
     expect(logs.some(line => line.includes('keeping access-mode preset'))).toBe(true)
   })
 
@@ -339,6 +406,7 @@ describe('uninstall cleanup', () => {
     editor.setOverride({ presets: { ...BASE_PRESETS, [SHIPPED_PRESET_KEY]: customized } })
     editor.setConfig({ presets: { ...BASE_PRESETS, [SHIPPED_PRESET_KEY]: customized } })
     await owner.detach()
+    await settle()
     expect(editor.calls).toHaveLength(0)
     expect(presetsOfConfig(editor.config())[SHIPPED_PRESET_KEY]).toEqual(customized)
     expect(logs.some(line => line.includes('kept access mode'))).toBe(true)
@@ -353,6 +421,7 @@ describe('uninstall cleanup', () => {
     })
     const { owner, logs } = await mounted({ presets: fakeCatalog([SHIPPED_PRESET_KEY]), editor })
     await owner.detach()
+    await settle()
     expect(editor.calls).toHaveLength(0)
     expect(presetsOfConfig(editor.config())[SHIPPED_PRESET_KEY]).toEqual(OWNED)
     expect(logs.some(line => line.includes('no presets'))).toBe(true)
@@ -366,7 +435,8 @@ describe('uninstall cleanup', () => {
       editor,
     })
     await owner.detach()
-    expect(editor.calls).toHaveLength(0)
+    await settle()
+    expect(editor.attempts).toBe(0)
   })
 })
 

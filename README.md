@@ -1,3 +1,7 @@
+## 0.6.1: uninstall cleanup no longer fights the host's reload lock
+
+The first real uninstall of 0.6.0 exposed an ordering bug: the uninstall runs inside the host's HMR transaction, and writing the preset back into the profile patch takes that same lock, so the deletion failed with `HMR transactions cannot be nested` and the menu kept "Approve for me". The removal now runs outside the transaction and retries (0.25s / 1s / 3s); only three blocked attempts leave the entry behind, with an explicit warning in the log and in `/approval-review status`.
+
 ## 0.6: the access-mode entry can no longer disappear silently
 
 The "Approve for me" entry lives in the `permission` row's preset table, and **an id-targeted override replaces that whole row** — so any later layer that restates the table (typically a profile patch pinning its own `defaultPreset`) drops it without a word: the menu lists three modes, the plugin's gate key is not in the catalog, and it claims nothing. This release adds two guards: a mount-time catalog check that names the cause in the startup log and in `/approval-review status`, and (by default) a managed entry written into the profile patch through `configEditor` — present while installed, removed on uninstall, no stale option. For a read-only deployment, `manageAccessModePreset: false` warns without ever writing. See [the access-mode entry's lifecycle](#the-access-mode-entrys-lifecycle).
