@@ -36,6 +36,7 @@ import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import { Config, validateReviewerEngine, type Config as ConfigShape } from './config.ts'
+import { AccessModePreset, describeAccessMode, readPermissionPresets } from './access-mode-preset.ts'
 import { readCredentialSeam } from './jev-key.ts'
 import { auditView } from './audit.ts'
 import { ReviewRuntime } from './runtime.ts'
@@ -136,6 +137,26 @@ export function apply(ctx: Context, config: ConfigShape): void {
     )
   }
   const runtime = new ReviewRuntime(ctx, config)
+
+  // The access-mode entry the gate depends on. Two jobs, both safe on a
+  // composition that lacks the services: the self-check names a shadowing
+  // `permission` override instead of letting the plugin sit silently inert, and
+  // (by default) the plugin keeps its own entry present in the profile patch for
+  // as long as it is installed, removing it again on uninstall. `inject` because
+  // the permission service may mount after this plugin does.
+  const accessMode = new AccessModePreset(ctx, config)
+  const lifecycle = ctx as unknown as {
+    inject(names: readonly string[], callback: (injected: Context) => void): unknown
+  }
+  lifecycle.inject(['permissionPresets'], (injected) => {
+    injected.effect(() => {
+      const presets = readPermissionPresets(injected)
+      if (presets !== undefined) void accessMode.attach(presets)
+      return () => {
+        void accessMode.detach()
+      }
+    }, 'dsh-approval-review: access-mode preset')
+  })
 
   // Committed events drive both the live counters and the folded ledger. The
   // projection registry separately folds the same log for the client; this
@@ -245,6 +266,10 @@ export function apply(ctx: Context, config: ConfigShape): void {
           const gate = config.reviewerPreset.length === 0
             ? (zh ? '任意访问模式' : 'any access mode')
             : (zh ? `访问模式 ${config.reviewerPreset}` : `access mode ${config.reviewerPreset}`)
+          // The second half of the same story: the gate key is only reachable
+          // while the catalog offers it. This line is what turns "the ledger is
+          // empty and nothing says why" into a stated cause.
+          const accessModeNote = describeAccessMode(accessMode.state(), config.reviewerPreset, zh)
           // Requests this plugin deliberately did NOT decide, with the reason code.
           // Without it, a ledger row that carries no rationale is unreadable: the
           // operator cannot tell "the reviewer never saw it" from "the reviewer
@@ -254,7 +279,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
             zh
               ? `自动审批：${view.enabled ? '开启' : '关闭'}｜复核引擎 ${engine}${overrideNote}｜门控 ${gate}｜模型 ${view.reviewerModel.length > 0 ? `${view.reviewerProvider.length > 0 ? `${view.reviewerProvider}/` : ''}${view.reviewerModel}` : '继承会话'}`
               : `Automatic approval review: ${view.enabled ? 'on' : 'off'} | engine ${engine}${overrideNote} | gate ${gate} | model ${view.reviewerModel.length > 0 ? `${view.reviewerProvider.length > 0 ? `${view.reviewerProvider}/` : ''}${view.reviewerModel}` : 'inherit session'}`,
-            zh
+            accessModeNote,            zh
               ? `本回合：复审 ${view.reviewsThisTurn}/${view.maxReviewsPerTurn}｜复核失败 ${runtime.failuresThisTurn(session)}/${config.maxFailuresPerTurn}｜连续否决 ${view.consecutiveDenials}`
               : `This turn: reviews ${view.reviewsThisTurn}/${view.maxReviewsPerTurn} | reviewer failures ${runtime.failuresThisTurn(session)}/${config.maxFailuresPerTurn} | consecutive denials ${view.consecutiveDenials}`,
             ...leftToHuman.length === 0 ? [] : [zh

@@ -175,6 +175,22 @@ export interface Config {
    * the access-mode entry the real on/off switch instead of a decorative label.
    */
   readonly reviewerPreset: string
+  /**
+   * Keep {@link reviewerPreset}'s access-mode entry present while this plugin is
+   * installed, and gone once it is not.
+   *
+   * A bundle patch is a layer: an id-targeted `permission` override replaces the
+   * whole row config, so a profile patch that restates its own preset table drops
+   * the entry this package ships — the menu then lacks it, the plugin claims
+   * nothing, and nothing says why. With this on (the default) the plugin checks
+   * the live catalog at mount, writes the missing entry into the profile patch
+   * through the `configEditor` service, adopts an identical entry a human already
+   * pasted there, and removes that entry when the bundle is uninstalled.
+   *
+   * Turn it off for a read-only deployment: the mount-time warning stays, but the
+   * plugin never writes the profile's configuration.
+   */
+  readonly manageAccessModePreset: boolean
   /** Tool-name patterns routed to the reviewer model. */
   readonly reviewTools: string[]
   /** Policy for tools matching no entry in {@link reviewTools}. */
@@ -259,6 +275,15 @@ export const Config: Schema<Config> = Schema.object({
     'Permission preset that turns auto-approval on. Empty means always claim. Set this to the '
     + 'preset key you added to `permissionPresets` (see cordis.patch.yml).',
   ),
+  manageAccessModePreset: Schema.boolean().default(true).description(
+    'Keep the `reviewerPreset` access-mode entry present while this plugin is installed and remove it '
+    + 'when the bundle is uninstalled. An id-targeted `permission` override replaces the whole row '
+    + 'config, so a profile patch that restates its own preset table silently drops the entry this '
+    + 'package ships; with this on, the plugin checks the live catalog at mount, writes the missing '
+    + 'entry into the profile patch through `configEditor`, adopts an identical entry already there, '
+    + 'and deletes that entry on uninstall. Set false to keep the deployment configuration read-only '
+    + '(the mount-time warning stays).',
+  ),
   reviewTools: Schema.array(Schema.string()).default(['*'])
     .description('Tool-name glob patterns routed to the reviewer model. `*` is every tool, '
       + 'which is the shipping stance: the reviewer decides, not the tool name.'),
@@ -319,8 +344,7 @@ export const Config: Schema<Config> = Schema.object({
         'Per-question instruction overrides, keyed by question id (see `src/jev-questions.ts`). '
         + 'Use it for deployment-specific wording; the option definitions stay in code.',
       ),
-    // @ts-expect-error Schemastery cannot express "every field has its own default",
-    // so `{}` is the correct seed even though the type demands the filled shape.
+    // Every field below carries its own default, so `{}` is the correct seed.
     }).default({}),
     provider: Schema.string().description('Reviewer provider route; unset inherits the calling agent.'),
     model: Schema.string().description('Reviewer model id; unset inherits the calling agent.'),
@@ -346,8 +370,7 @@ export const Config: Schema<Config> = Schema.object({
       .description('Max characters of one stringified argument value before truncation.'),
     argumentsBudgetChars: Schema.number().step(1).min(0).default(16000)
       .description('Cross-field argument budget in characters; 0 disables the cap.'),
-  // @ts-expect-error Schemastery cannot express "every field has its own default",
-  // so `{}` is the correct seed even though the type demands the filled shape.
+  // Every field below carries its own default, so `{}` is the correct seed.
   }).default({}),
 
   context: Schema.object({
@@ -359,8 +382,7 @@ export const Config: Schema<Config> = Schema.object({
       .description('Include assistant messages in the transcript.'),
     includeToolActivity: Schema.boolean().default(true)
       .description('Include tool calls and results in the transcript.'),
-  // @ts-expect-error Schemastery cannot express "every field has its own default",
-  // so `{}` is the correct seed even though the type demands the filled shape.
+  // Every field below carries its own default, so `{}` is the correct seed.
   }).default({}),
 
   maxAutoAllowRisk: Schema.union(RISK_LEVELS).default('high')
@@ -379,8 +401,7 @@ export const Config: Schema<Config> = Schema.object({
       .description('Maximum reviewer calls per open turn.'),
     onExhausted: Schema.union(BUDGET_ACTIONS).default('delegate')
       .description('Reaction once the per-turn review budget is spent.'),
-  // @ts-expect-error Schemastery cannot express "every field has its own default",
-  // so `{}` is the correct seed even though the type demands the filled shape.
+  // Every field below carries its own default, so `{}` is the correct seed.
   }).default({}),
 
   maxFailuresPerTurn: Schema.number().step(1).min(1).default(10)
@@ -393,8 +414,7 @@ export const Config: Schema<Config> = Schema.object({
         + 'Leave disabled when the decision depends on mutable local state.'),
     maxEntries: Schema.number().step(1).min(0).default(256)
       .description('Maximum cached fingerprints before oldest-eviction.'),
-  // @ts-expect-error Schemastery cannot express "every field has its own default",
-  // so `{}` is the correct seed even though the type demands the filled shape.
+  // Every field below carries its own default, so `{}` is the correct seed.
   }).default({}),
 
   circuitBreaker: Schema.object({
@@ -406,8 +426,7 @@ export const Config: Schema<Config> = Schema.object({
       .description('Rolling window size for `windowDenials`.'),
     action: Schema.union(CIRCUIT_ACTIONS).default('stop')
       .description('Reaction once the breaker is open.'),
-  // @ts-expect-error Schemastery cannot express "every field has its own default",
-  // so `{}` is the correct seed even though the type demands the filled shape.
+  // Every field below carries its own default, so `{}` is the correct seed.
   }).default({}),
 
   override: Schema.object({
@@ -415,8 +434,7 @@ export const Config: Schema<Config> = Schema.object({
       .description('How long an `/approve` authorization stays usable.'),
     maxPending: Schema.number().step(1).min(1).default(10)
       .description('How many recent denials `/approve` can address.'),
-  // @ts-expect-error Schemastery cannot express "every field has its own default",
-  // so `{}` is the correct seed even though the type demands the filled shape.
+  // Every field below carries its own default, so `{}` is the correct seed.
   }).default({}),
 
   reasonMaxChars: Schema.number().step(1).min(128).default(2000)

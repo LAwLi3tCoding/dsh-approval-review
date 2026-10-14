@@ -17,6 +17,13 @@
         enabled: true
         # Session-start default for that switch.
         enabledByDefault: true
+        # Keep the `reviewerPreset` access-mode entry honest in BOTH directions:
+        # the mount-time self-check names a later `permission` override that has
+        # shadowed it, and this switch lets the plugin write the missing entry
+        # into the profile's own patch layer (through `configEditor`) and delete
+        # it again when the bundle is uninstalled. `false` keeps the deployment
+        # configuration read-only: warning only, never a write.
+        manageAccessModePreset: true
         # EVERY request reaches the reviewer, not just a tool list.
         #
         # `*` matches every tool name, and `defaultPolicy: ai` covers a request

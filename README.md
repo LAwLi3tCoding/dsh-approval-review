@@ -1,3 +1,7 @@
+## 0.6: the access-mode entry can no longer disappear silently
+
+The "Approve for me" entry lives in the `permission` row's preset table, and **an id-targeted override replaces that whole row** — so any later layer that restates the table (typically a profile patch pinning its own `defaultPreset`) drops it without a word: the menu lists three modes, the plugin's gate key is not in the catalog, and it claims nothing. This release adds two guards: a mount-time catalog check that names the cause in the startup log and in `/approval-review status`, and (by default) a managed entry written into the profile patch through `configEditor` — present while installed, removed on uninstall, no stale option. For a read-only deployment, `manageAccessModePreset: false` warns without ever writing. See [the access-mode entry's lifecycle](#the-access-mode-entrys-lifecycle).
+
 # dsh-approval-review
 
 [English](README.md) | [简体中文](README-zh.md)
@@ -133,6 +137,8 @@ schema defaults.
 |---|---|---|
 | `enabled` | `true` | Master switch. `false` mounts the plugin but claims nothing. |
 | `enabledByDefault` | `true` | Session-start default for the runtime switch. |
+| `reviewerPreset` | `approve-for-me` | The access-mode key that turns this plugin on. Empty means any access mode claims (for a deployment with no such entry). |
+| `manageAccessModePreset` | `true` | Write (or adopt) that access-mode entry in the profile patch while installed, and delete it on uninstall; `false` warns only and never writes configuration. See [the access-mode entry's lifecycle](#the-access-mode-entrys-lifecycle). |
 | `reviewTools` | `['*']` | All tool approval requests by default. |
 | `defaultPolicy` | `ai` | Fallback routing policy for unmatched tools. |
 | `rules` | `[]` | Ordered `{pattern, policy, field?, note?}` regex rules, evaluated before the tool table. `field` is `reason` (default), `toolName`, or `arguments`. |
@@ -172,6 +178,43 @@ schema defaults.
 | `feedReasonToModel` | `true` | Append the rationale to the refused tool result. |
 | `recordAllowedVerdicts` | `true` | Append the **allow** verdict to the accepted tool result, so the card can show why an action was allowed. Costs one short marker block in the model context per auto-allowed call. |
 | `language` | `auto` | **Prose** language this plugin emits: `/approval-review` command output and the reviewer's `reason`/`suggestion` fields. `auto` follows the harness language setting (Settings → General → Language), `en`/`zh` pin it. Resolved per call, so a switch applies to the next command and the next verdict. Boundaries: the `decision`/`risk` enums stay English tokens (the parser validates them), and text already recorded in the transcript — an earlier verdict's prose, an earlier command's output — is never rewritten. |
+
+### The access-mode entry's lifecycle
+
+The "Approve for me" entry lives in the `permission` row's preset table. **An
+id-targeted override replaces that whole row**, so any later layer that restates
+the table — typically a profile patch pinning its own `defaultPreset` — silently
+drops the entry this package ships. The menu then lists three modes, the plugin's
+gate key is not in the catalog, and it claims nothing while the log says nothing.
+
+Two guards fix that:
+
+1. **Self-check.** At mount the plugin reads the live catalog
+   (`permissionPresets.catalog()`). A missing gate key is named in the startup
+   log, and the `Access-mode catalog` line of `/approval-review status` keeps
+   reporting the conclusion — missing, written, or only fixable by hand.
+2. **Managed entry** (`manageAccessModePreset: true`, the default). Through the
+   `configEditor` service the plugin writes the missing entry into the **profile
+   patch** — the layer no later override can shadow — and adopts an identical
+   entry a human already pasted there instead of writing a duplicate. On uninstall
+   it deletes that entry again: installing adds the menu option, uninstalling
+   removes it, and no stale option is left behind.
+
+Ownership stays narrow, so the plugin never touches somebody else's preset:
+
+- Only a **byte-identical** definition is owned. Renamed or retuned entries are
+  treated as the operator's, kept on uninstall, and reported in one log line.
+  The preset table is never emptied.
+- The uninstall signal is the profile's own `dsh.profile.bundles`. A normal app
+  exit unmounts plugins too, and there the bundle is still listed, so the entry
+  survives a restart as it should.
+- A refused write (an id also pinned by a home patch or a command-line overlay is
+  rejected by `configEditor`) is a warning, not a mount failure, and
+  `/approval-review status` shows the reason.
+
+For a deployment whose configuration is read-only, set
+`manageAccessModePreset: false`: the self-check still warns, and nothing is ever
+written.
 
 ### Reviewer engines: `llm` and `jev`
 

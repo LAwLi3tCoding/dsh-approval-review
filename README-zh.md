@@ -1,3 +1,7 @@
+## 0.6：访问模式菜单项不再会静默消失
+
+「替我审批」这一项来自 `permission` 行的预设表，而**按 id 覆盖会整行替换**——任何在后面重述这张表的层（典型是 profile 补丁为了设 `defaultPreset` 而重写整行）都会把它抹掉，而且不报错：菜单只剩三项，插件的门控 key 不在目录里，它一个请求都不认领，日志里也看不出为什么。本版加了两道防线：挂载时核对生效目录，并在启动日志与 `/approval-review status` 里点名；默认经 `configEditor` 把缺的那一项写进 profile 补丁——装上就有、卸载即删，不留脏选项。只读部署把 `manageAccessModePreset` 设为 `false`，则只告警、绝不写配置。详见[访问模式菜单项的生命周期](#访问模式菜单项的生命周期)。
+
 # dsh-approval-review
 
 [English](README.md) | [简体中文](README-zh.md)
@@ -94,6 +98,8 @@ dsh --profile <profile> --dump-config | grep -A6 'id: approval-review'
 |---|---|---|
 | `enabled` | `true` | 总开关。`false` 时插件仍挂载但不认领任何请求。 |
 | `enabledByDefault` | `true` | 会话初始的运行时开关状态。 |
+| `reviewerPreset` | `approve-for-me` | 打开插件的访问模式 key。空字符串表示任意访问模式都认领（适合没有这个菜单项的部署）。 |
+| `manageAccessModePreset` | `true` | 装上插件时把该访问模式项写进（或采纳自）profile 补丁，卸载时删掉它；`false` 只告警、绝不写配置。见[访问模式菜单项的生命周期](#访问模式菜单项的生命周期)。 |
 | `reviewTools` | `['*']` | 默认复核所有工具的审批请求。 |
 | `defaultPolicy` | `ai` | 未匹配工具的默认策略。 |
 | `rules` | `[]` | 有序的 `{pattern, policy, field?, note?}` 正则规则，优先于工具表求值。`field` 可为 `reason`（默认）、`toolName`、`arguments`。 |
@@ -133,6 +139,23 @@ dsh --profile <profile> --dump-config | grep -A6 'id: approval-review'
 | `feedReasonToModel` | `true` | 是否把理由追加到被拒的工具结果。 |
 | `recordAllowedVerdicts` | `true` | 是否把**放行**裁决也追加到被接受的工具结果。关掉后页签只显示"放行了"、不显示理由；打开的成本是每次自动放行多一小段标记进入模型上下文。 |
 | `language` | `auto` | 插件对外输出的**散文语言**——`/approval-review` 的命令输出，以及复核模型的 `reason`/`suggestion` 两个字段。`auto` 跟随 DSH 语言设置（设置 → 通用 → 语言），`en`/`zh` 强制指定。每次调用时解析，切换后下一条命令、下一次裁决即生效。边界：`decision`/`risk` 等枚举值始终是英文 token（解析器按英文校验），已写入转录的文本（旧裁决的理由、旧命令输出）不会被改写。 |
+
+### 访问模式菜单项的生命周期
+
+「替我审批」这一项来自 `permission` 行里的预设表。而**按 id 覆盖会整行替换**：任何在后面重述这张表的层——典型是 profile 补丁为了设 `defaultPreset` 而重写整行——都会把插件自带的这一项抹掉，而且不会报错。结果就是菜单里只有三项，插件的门控 key 不在目录里，它一个请求都不认领，日志里也看不出为什么。
+
+插件对此做两件事：
+
+1. **自检**：挂载时核对生效的访问模式目录（`permissionPresets.catalog()`）。缺少门控 key 就在启动日志里点名，并在 `/approval-review status` 的「访问模式目录」一行里持续给出结论——缺项、是否已自动写入、还是只能手动补。
+2. **自维护**（`manageAccessModePreset: true`，默认）：通过 `configEditor` 把缺的那一项写进 **profile 补丁**，也就是再也不会被后面的层覆盖的那一层；如果 profile 补丁里已经有一份逐字相同的定义，插件直接采纳它，不重复写。**卸载时删除它**——所以装上有这一项、卸下就没有，不留脏选项。
+
+判定所有权很克制，避免动别人的东西：
+
+- 只认**逐字相同**的定义；名字、描述或档位被人改过，就视为别人的，卸载时保留并记一行日志；也绝不会把预设表删空。
+- 卸载判定读 profile 的 `dsh.profile.bundles`：应用正常退出同样会触发插件卸载，那时 bundle 仍在列表里，因此不会误删——菜单项该跟着插件长期存在。
+- 写入失败（例如同 id 被 home patch 或命令行 overlay 覆盖，`configEditor` 会直接拒绝）只记警告，插件照常挂载，`/approval-review status` 会显示失败原因。
+
+部署要求配置文件只读时，把 `manageAccessModePreset` 设为 `false`：自检告警照旧，但绝不写配置。
 
 ### 复核引擎：`llm` 与 `jev`
 

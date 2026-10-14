@@ -175,6 +175,22 @@ interface Config {
    * the access-mode entry the real on/off switch instead of a decorative label.
    */
   readonly reviewerPreset: string;
+  /**
+   * Keep {@link reviewerPreset}'s access-mode entry present while this plugin is
+   * installed, and gone once it is not.
+   *
+   * A bundle patch is a layer: an id-targeted `permission` override replaces the
+   * whole row config, so a profile patch that restates its own preset table drops
+   * the entry this package ships — the menu then lacks it, the plugin claims
+   * nothing, and nothing says why. With this on (the default) the plugin checks
+   * the live catalog at mount, writes the missing entry into the profile patch
+   * through the `configEditor` service, adopts an identical entry a human already
+   * pasted there, and removes that entry when the bundle is uninstalled.
+   *
+   * Turn it off for a read-only deployment: the mount-time warning stays, but the
+   * plugin never writes the profile's configuration.
+   */
+  readonly manageAccessModePreset: boolean;
   /** Tool-name patterns routed to the reviewer model. */
   readonly reviewTools: string[];
   /** Policy for tools matching no entry in {@link reviewTools}. */

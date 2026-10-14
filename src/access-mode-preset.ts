@@ -1,0 +1,564 @@
+/**
+ * The access-mode option this package owns — and the two things that keep it
+ * honest across an install/uninstall cycle.
+ *
+ * WHY THIS MODULE EXISTS
+ *
+ * The plugin's gate (`reviewerPreset`) is only reachable while the harness's
+ * access-mode catalog contains an option with that key. The plugin ships that
+ * option in its own bundle patch, but a bundle patch is a LAYER: an id-targeted
+ * override REPLACES the whole `permission` row config, so any later layer that
+ * restates the row without this entry (a profile patch pinning its own preset
+ * table, which is the normal way a deployment sets `defaultPreset`) silently
+ * drops it. The menu then shows three entries, the plugin claims nothing, and
+ * nothing in the log says why.
+ *
+ * The two guards here:
+ *
+ * 1. SELF-CHECK (`reviewerPreset` missing from `catalog()`): warn at mount and
+ *    report in `/approval-review status`, naming the cause and the fix, so the
+ *    silent failure becomes a stated one.
+ * 2. MANAGED ENTRY (`manageAccessModePreset: true`, the default): the plugin
+ *    writes the option into the profile's own patch layer through the
+ *    `configEditor` service — which is where a later override can no longer
+ *    shadow it — and removes it again when the bundle is uninstalled. Installing
+ *    the plugin therefore adds the menu entry; uninstalling removes it. No
+ *    leftover option.
+ *
+ * Ownership is never assumed: the plugin adopts an identical entry it finds in
+ * the profile patch (so an entry a human pasted there is still cleaned up on
+ * uninstall), and it only ever removes a `presets[reviewerPreset]` that is
+ * byte-identical to {@link SHIPPED_PRESET} — a customized entry is left alone
+ * with a log line saying so.
+ *
+ * Both services are read STRUCTURALLY. This plugin must build and mount without
+ * the `permissionPresets` or `configEditor` packages present: every deployment
+ * shape that lacks them simply keeps the warning path instead of failing.
+ * @module dsh-approval-review/access-mode-preset
+ */
+
+import { isDeepStrictEqual } from 'node:util'
+import { readFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import type { Context } from '@deepseek-ai/cordis'
+import type { Config } from './config.ts'
+
+/** This package's name, as the profile bundle list spells it. */
+export const PACKAGE_NAME = 'dsh-approval-review'
+
+/** The package that owns the `permission` row this plugin contributes to. */
+export const PERMISSION_PRESETS_PACKAGE = '@deepseek-ai/dsh-permission-presets'
+
+/** The row id that package's bundle patch uses, for deployments that rename the module. */
+export const PERMISSION_ROW_ID = 'permission'
+
+/** The preset key this package ships; the default of `Config.reviewerPreset`. */
+export const SHIPPED_PRESET_KEY = 'approve-for-me'
+
+/** One access-mode entry as the catalog exposes it. */
+export interface PresetOption {
+  /** The preset key written into the session log. */
+  readonly value: string
+  /** The label the access-mode control renders. */
+  readonly name: string
+  /** The one-line explanation the control renders. */
+  readonly description?: string
+}
+
+/** The catalog `permissionPresets.catalog()` returns, read for the option list only. */
+export interface PermissionCatalog {
+  /** Every currently selectable preset: configured entries, then `auto` while it is live. */
+  readonly options: readonly PresetOption[]
+}
+
+/** The `permissionPresets` service, structurally typed. */
+export interface PermissionPresetsLike {
+  /** Read the process-level catalog exposed to current-session UI. */
+  catalog(): PermissionCatalog
+}
+
+/** One loader entry, as `configEditor` addresses it. */
+export interface LoaderEntryLike {
+  /** The loader's own entry options; `id` is the patch id, `name` the module name. */
+  readonly options: {
+    /** The patch id this entry was declared under. */
+    readonly id: string
+    /** The module name that implements the entry. */
+    readonly name: string
+  }
+}
+
+/** One addressable profile row: the entry, plus its inherited and explicit config. */
+export interface ProfileRowLike {
+  /** The active loader entry. */
+  readonly entry: LoaderEntryLike
+  /** The composed value WITHOUT this profile patch's own config for the row. */
+  readonly inherited: Record<string, unknown>
+  /** The profile patch's explicit config for the row, when it has one. */
+  readonly override: Record<string, unknown>
+}
+
+/**
+ * The `configEditor` service, structurally typed.
+ *
+ * `documentPath` is a getter on the service (the profile patch this editor
+ * writes); it is read for the uninstall check and treated as optional, because
+ * a deployment may expose the service without it.
+ */
+export interface ConfigEditorLike {
+  /** Addressable profile rows with unique patch ids. */
+  entries(): readonly LoaderEntryLike[]
+  /** Inherited and explicit profile values for the active entries. */
+  configuration(): readonly ProfileRowLike[]
+  /**
+   * The profile patch file this editor writes; absent on a foreign service.
+   */
+  readonly documentPath?: string
+  /** Validate, persist, and reconcile one row's next config. */
+  edit(
+    entry: LoaderEntryLike,
+    change: (current: Record<string, unknown>, inherited: Record<string, unknown>) => Record<string, unknown>,
+  ): Promise<void>
+}
+
+/**
+ * The preset this package owns.
+ *
+ * MUST stay byte-identical to the `approve-for-me` entry in this package's
+ * `cordis.patch.yml`: that patch is what a deployment without a competing
+ * override gets, and it is what the managed write reproduces. A test pins the
+ * two together, so drift fails the build instead of shipping.
+ *
+ * The knobs deliberately match `workspace-write`: the difference is WHO answers
+ * an approval (this plugin's reviewer instead of a human prompt), not how far
+ * the agent may reach. Keeping the boundary identical is what lets a session
+ * switch between "a human answers" and "the reviewer answers" without changing
+ * what the agent is allowed to attempt.
+ */
+export const SHIPPED_PRESET = {
+  sandbox: 'workspace-write',
+  approval: 'ask',
+  name: '替我审批',
+  description: '与"工作区内修改"相同的边界，但需要批准的动作先交给复核模型，只有危险或不确定的才转人工。',
+} as const
+
+/**
+ * What the self-check found, reported by `/approval-review status`.
+ *
+ * Every variant is a RESTING state, not an error: a deployment that pins its own
+ * preset table without this entry is misconfigured, not broken, and the report
+ * says which of the two it is.
+ */
+export type AccessModeState =
+  /** `reviewerPreset` is empty: the plugin claims in any access mode, so there is no entry to keep. */
+  | { readonly kind: 'any-mode' }
+  /** No `permissionPresets` service in this composition: the gate cannot be checked. */
+  | { readonly kind: 'service-missing' }
+  /** The catalog already offers the key from another layer (this package's own bundle patch). */
+  | { readonly kind: 'provided' }
+  /** The profile patch holds an identical entry; this plugin owns its removal. */
+  | { readonly kind: 'adopted' }
+  /** The entry was missing and this plugin wrote it into the profile patch. */
+  | { readonly kind: 'written' }
+  /** The entry is missing and `manageAccessModePreset` is off. */
+  | { readonly kind: 'missing-unmanaged' }
+  /** The entry is missing, management is on, but no `configEditor` is mounted. */
+  | { readonly kind: 'missing-no-editor' }
+  /** The check or the write failed; `detail` carries the reason. */
+  | { readonly kind: 'failed'; readonly detail: string }
+
+/** A logger surface, taken from the mounting context. */
+type Logger = Pick<ReturnType<Context['logger']>, 'info' | 'warn' | 'debug'>
+
+/** Read a row config's `presets` map without trusting its shape. */
+function presetsOf(config: Record<string, unknown> | undefined): Record<string, unknown> {
+  const presets = config?.['presets']
+  return presets !== null && typeof presets === 'object' && !Array.isArray(presets)
+    ? { ...(presets as Record<string, unknown>) }
+    : {}
+}
+
+/** Whether one row config declares this package's preset verbatim. */
+function declaresShippedPreset(config: Record<string, unknown> | undefined, key: string): boolean {
+  return isDeepStrictEqual(presetsOf(config)[key], { ...SHIPPED_PRESET })
+}
+
+/** The logger this plugin writes its own diagnostics under. */
+function loggerOf(ctx: Context): Logger {
+  return ctx.logger('dsh-approval-review')
+}
+
+/** Structural read of an optional service, so this package needs no type outlet for it. */
+function serviceOf<T>(ctx: Context, name: string): T | undefined {
+  const lookup = ctx as unknown as { get(key: string): unknown }
+  const service = lookup.get(name)
+  return service === undefined || service === null ? undefined : service as T
+}
+
+/**
+ * The mounted `permissionPresets` service, read structurally.
+ * @param ctx - any context in this composition.
+ * @returns the service, or undefined when this deployment has none.
+ */
+export function readPermissionPresets(ctx: Context): PermissionPresetsLike | undefined {
+  return serviceOf<PermissionPresetsLike>(ctx, 'permissionPresets')
+}
+
+/**
+ * Keep this plugin's access-mode entry present while it is installed, and gone
+ * once it is not.
+ *
+ * One instance lives for the plugin's mount. `attach()` runs when the
+ * `permissionPresets` service is available (which may be after this plugin
+ * mounts), `detach()` runs when the plugin unmounts, and `state()` is read by
+ * the status command at any time.
+ */
+export class AccessModePreset {
+  /** The last observed state; `service-missing` until `attach()` runs. */
+  private observed: AccessModeState = { kind: 'service-missing' }
+  /** Whether the profile patch currently holds an entry this plugin may remove. */
+  private owned = false
+  /** Pending uninstall re-checks, so a shutdown does not tear them down early. */
+  private readonly timers = new Set<ReturnType<typeof setTimeout>>()
+  /** Set once the plugin is unmounting, so a late `attach()` cannot re-write config. */
+  private stopped = false
+
+  /**
+   * @param ctx - the mounting context, used for logging and further lookups.
+   * @param config - validated plugin configuration.
+   */
+  constructor(
+    private readonly ctx: Context,
+    private readonly config: Config,
+  ) {}
+
+  /** The gate key this deployment configured; empty means "any access mode". */
+  private get key(): string {
+    return this.config.reviewerPreset
+  }
+
+  /** The `configEditor` service, when this composition has one. */
+  private editor(): ConfigEditorLike | undefined {
+    return serviceOf<ConfigEditorLike>(this.ctx, 'configEditor')
+  }
+
+  /** The `permission` row this plugin contributes to, as `configEditor` addresses it. */
+  private permissionEntry(editor: ConfigEditorLike): LoaderEntryLike | undefined {
+    return editor.entries().find(entry =>
+      entry.options.name === PERMISSION_PRESETS_PACKAGE || entry.options.id === PERMISSION_ROW_ID)
+  }
+
+  /** The current state, for the status command. */
+  state(): AccessModeState {
+    return this.observed
+  }
+
+  /**
+   * Run the self-check, and adopt or write the entry when that is what the
+   * configuration asks for. Never throws: a deployment that cannot be repaired
+   * still gets the answerer and a precise warning.
+   * @param service - the mounted `permissionPresets` service.
+   */
+  async attach(service: PermissionPresetsLike): Promise<void> {
+    try {
+      await this.attachChecked(service)
+    } catch (error) {
+      this.fail('access-mode check crashed', error)
+    }
+  }
+
+  /** {@link attach}, with the crash guard lifted so the branches stay readable. */
+  private async attachChecked(service: PermissionPresetsLike): Promise<void> {
+    if (this.stopped) return
+    const key = this.key
+    if (key.length === 0) {
+      this.observed = { kind: 'any-mode' }
+      return
+    }
+    let present: boolean
+    try {
+      present = service.catalog().options.some(option => option.value === key)
+    } catch (error) {
+      this.fail('could not read the access-mode catalog', error)
+      return
+    }
+    const editor = this.editor()
+    // An identical entry in the profile patch is adopted even when the catalog
+    // already shows the key: that entry is the one a human pasted there, and it
+    // is the one that would otherwise outlive an uninstall.
+    if (editor !== undefined && this.profileOwns(editor, key)) {
+      this.owned = true
+      this.observed = { kind: 'adopted' }
+      if (!present) {
+        loggerOf(this.ctx).warn(
+          `the profile patch declares preset "${key}" but the access-mode catalog does not offer it; `
+          + 'the plugin will claim nothing until it does',
+        )
+      }
+      return
+    }
+    if (present) {
+      this.observed = { kind: 'provided' }
+      return
+    }
+    if (!this.config.manageAccessModePreset) {
+      this.observed = { kind: 'missing-unmanaged' }
+      this.warnMissing('manageAccessModePreset is false, so this plugin will not write it')
+      return
+    }
+    if (editor === undefined) {
+      this.observed = { kind: 'missing-no-editor' }
+      this.warnMissing('no `configEditor` service is mounted, so it cannot be written automatically')
+      return
+    }
+    const entry = this.permissionEntry(editor)
+    if (entry === undefined) {
+      this.fail(`no loader entry for "${PERMISSION_PRESETS_PACKAGE}" to write the preset into`, undefined)
+      return
+    }
+    try {
+      let conflict = false
+      await editor.edit(entry, current => {
+        const presets = presetsOf(current)
+        const existing = presets[key]
+        // Never overwrite a DIFFERENT definition that happens to share the key:
+        // an operator's wording or a deployment's own knobs are not this
+        // package's to replace. The catalog said the key was absent, so this is
+        // a defence against a stale read, not the expected path.
+        if (existing !== undefined && !isDeepStrictEqual(existing, { ...SHIPPED_PRESET })) {
+          conflict = true
+          return current
+        }
+        return { ...current, presets: { ...presets, [key]: { ...SHIPPED_PRESET } } }
+      })
+      if (conflict) {
+        this.fail(`preset "${key}" already exists with a different definition; left untouched`, undefined)
+        return
+      }
+    } catch (error) {
+      this.fail(`could not write preset "${key}" into the profile patch`, error)
+      return
+    }
+    if (this.stopped) {
+      // Unmounted while the write was in flight: leave nothing behind.
+      await this.detach()
+      return
+    }
+    this.owned = true
+    this.observed = { kind: 'written' }
+    loggerOf(this.ctx).info(
+      `access mode "${key}" was missing from the catalog — most likely a later \`permission\` override `
+      + `replaced the row this package ships. Wrote it into the profile patch (manageAccessModePreset).`,
+    )
+  }
+
+  /**
+   * Remove the entry this plugin owns, but only when the bundle really is gone.
+   *
+   * Unmount also happens on app shutdown and on every config reload, and removing
+   * the entry then would delete the menu option on a normal exit. The signal used
+   * is the profile's own bundle list: the plugin manager removes the package from
+   * `dsh.profile.bundles` before it reconciles the tree, so a missing entry means
+   * uninstall. Because that write and this unmount race, the check is repeated a
+   * few times; a shutdown (bundle still listed) keeps the entry, and the next
+   * mount re-adopts it.
+   */
+  async detach(): Promise<void> {
+    try {
+      await this.detachChecked()
+    } catch (error) {
+      this.warnOrphan(error)
+    }
+  }
+
+  /** {@link detach}, with the crash guard lifted. */
+  private async detachChecked(): Promise<void> {
+    this.stopped = true
+    if (!this.owned) return
+    if (await this.bundleStillInstalled()) {
+      loggerOf(this.ctx).debug(
+        `keeping access-mode preset "${this.key}": the profile still lists ${PACKAGE_NAME}`,
+      )
+      this.retryAfterUninstall()
+      return
+    }
+    await this.remove()
+  }
+
+  /**
+   * Re-check a few times for an uninstall whose bundle-list write lands after the
+   * unmount that it triggers. Deliberately plain timers: the plugin's own context
+   * is being disposed, so a context-owned timer would never fire.
+   */
+  private retryAfterUninstall(attempt = 0): void {
+    if (attempt >= 3) return
+    const timer = setTimeout(() => {
+      this.timers.delete(timer)
+      void (async () => {
+        if (await this.bundleStillInstalled()) {
+          this.retryAfterUninstall(attempt + 1)
+          return
+        }
+        await this.remove()
+      })()
+    }, 1000)
+    this.timers.add(timer)
+  }
+
+  /** Delete this plugin's preset from the profile patch, when it is still ours. */
+  private async remove(): Promise<void> {
+    const editor = this.editor()
+    if (editor === undefined) {
+      this.warnOrphan()
+      return
+    }
+    const entry = this.permissionEntry(editor)
+    if (entry === undefined) {
+      this.warnOrphan()
+      return
+    }
+    // Decide from the profile patch's OWN config before touching the loader: a
+    // customized entry is somebody else's now, and an `edit` that changes
+    // nothing would still rewrite the row.
+    const row = this.configurationRow(editor)
+    const overridePresets = presetsOf(row?.override)
+    if (!isDeepStrictEqual(overridePresets[this.key], { ...SHIPPED_PRESET })) {
+      loggerOf(this.ctx).info(
+        `kept access mode "${this.key}": the profile patch no longer holds this package's definition`,
+      )
+      return
+    }
+    if (Object.keys(overridePresets).length <= 1) {
+      loggerOf(this.ctx).info(
+        `kept access mode "${this.key}": removing it would leave the permission row with no presets`,
+      )
+      return
+    }
+    try {
+      await editor.edit(entry, current => {
+        const presets = presetsOf(current)
+        // Re-check against the live config, which is what the write replaces.
+        if (!isDeepStrictEqual(presets[this.key], { ...SHIPPED_PRESET })) return current
+        if (Object.keys(presets).length <= 1) return current
+        delete presets[this.key]
+        return { ...current, presets }
+      })
+      this.owned = false
+      loggerOf(this.ctx).info(
+        `removed access mode "${this.key}" from the profile patch (${PACKAGE_NAME} is uninstalled)`,
+      )
+    } catch (error) {
+      this.warnOrphan(error)
+    }
+  }
+
+  /** Whether the profile's bundle list still includes this package. */
+  private async bundleStillInstalled(): Promise<boolean> {
+    const editor = this.editor()
+    const documentPath = editor?.documentPath
+    // No path to read: keep the entry. A leftover option is recoverable; a deleted
+    // one on a normal exit is a support ticket.
+    if (documentPath === undefined) return true
+    try {
+      const text = await readFile(join(dirname(documentPath), 'package.json'), 'utf8')
+      const manifest = JSON.parse(text) as { dsh?: { profile?: { bundles?: unknown } } }
+      const bundles = manifest.dsh?.profile?.bundles
+      if (!Array.isArray(bundles)) return true
+      return bundles.includes(PACKAGE_NAME)
+    } catch {
+      return true
+    }
+  }
+
+  /** The row `configEditor` reports for the `permission` entry, when it has one. */
+  private configurationRow(editor: ConfigEditorLike): ProfileRowLike | undefined {
+    return editor.configuration().find(candidate =>
+      candidate.entry.options.name === PERMISSION_PRESETS_PACKAGE
+      || candidate.entry.options.id === PERMISSION_ROW_ID)
+  }
+
+  /** Whether the profile patch's own config for the row declares this preset verbatim. */
+  private profileOwns(editor: ConfigEditorLike, key: string): boolean {
+    try {
+      return declaresShippedPreset(this.configurationRow(editor)?.override, key)
+    } catch (error) {
+      loggerOf(this.ctx).debug(
+        `access-mode ownership could not be read: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      return false
+    }
+  }
+
+  /** The warning for a gate key the catalog does not offer and this plugin cannot add. */
+  private warnMissing(reason: string): void {
+    loggerOf(this.ctx).warn(
+      `reviewerPreset "${this.key}" is missing from the access-mode catalog: ${reason}. `
+      + 'Until that entry exists the plugin claims NOTHING and every approval goes to a human. '
+      + 'An id-targeted `permission` override replaces the whole row config, which is what drops the '
+      + 'entry this package ships — restate it there, or leave manageAccessModePreset on so the plugin '
+      + 'writes it itself.',
+    )
+  }
+
+  /** The warning for an entry this plugin could not delete while unmounting. */
+  private warnOrphan(error?: unknown): void {
+    const detail = error === undefined ? '' : ` (${error instanceof Error ? error.message : String(error)})`
+    loggerOf(this.ctx).warn(
+      `could not remove access-mode preset "${this.key}" from the profile patch${detail}. `
+      + `It is a harmless leftover — with ${PACKAGE_NAME} gone nothing claims those requests and they `
+      + 'go to a human prompt — but the menu still shows the entry. Delete that key from the '
+      + '`permission` row in the profile patch to tidy up.',
+    )
+  }
+
+  /** Record a failure and warn, keeping the plugin mounted. */
+  private fail(what: string, error: unknown): void {
+    const detail = error === undefined ? what : `${what}: ${error instanceof Error ? error.message : String(error)}`
+    this.observed = { kind: 'failed', detail }
+    loggerOf(this.ctx).warn(`access-mode preset check failed — ${detail}`)
+  }
+}
+
+/**
+ * The status-command line for one observed state.
+ * @param state - the state reported by {@link AccessModePreset.state}.
+ * @param key - the configured `reviewerPreset`.
+ * @param zh - whether the command output is Chinese.
+ * @returns one line for `/approval-review status`.
+ */
+export function describeAccessMode(state: AccessModeState, key: string, zh: boolean): string {
+  switch (state.kind) {
+    case 'any-mode':
+      return zh
+        ? '访问模式目录：不适用（reviewerPreset 为空，任意模式都认领）'
+        : 'Access-mode catalog: not applicable (reviewerPreset is empty; any mode claims)'
+    case 'service-missing':
+      return zh
+        ? '访问模式目录：无法核对（permissionPresets 服务未挂载）'
+        : 'Access-mode catalog: not checkable (no permissionPresets service)'
+    case 'provided':
+      return zh
+        ? `访问模式目录：含 ${key}`
+        : `Access-mode catalog: contains ${key}`
+    case 'adopted':
+      return zh
+        ? `访问模式目录：含 ${key}（profile 补丁提供，卸载时随插件移除）`
+        : `Access-mode catalog: contains ${key} (from the profile patch; removed on uninstall)`
+    case 'written':
+      return zh
+        ? `访问模式目录：缺少 ${key}，已自动写入 profile 补丁`
+        : `Access-mode catalog: ${key} was missing and has been written into the profile patch`
+    case 'missing-unmanaged':
+      return zh
+        ? `访问模式目录：缺少 ${key}，且 manageAccessModePreset=false —— 本插件不会认领任何请求`
+        : `Access-mode catalog: ${key} is missing and manageAccessModePreset=false — the plugin claims nothing`
+    case 'missing-no-editor':
+      return zh
+        ? `访问模式目录：缺少 ${key}，且 configEditor 不可用，需手动补进 permission 行`
+        : `Access-mode catalog: ${key} is missing and configEditor is unavailable — add it by hand`
+    case 'failed':
+      return zh
+        ? `访问模式目录：核对失败（${state.detail}）`
+        : `Access-mode catalog: check failed (${state.detail})`
+  }
+}
