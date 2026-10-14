@@ -1,6 +1,6 @@
 {
   "name": "dsh-approval-review",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Codex-style auto-approval for DeepSeek Harness. An independent reviewer decides allow/deny, fail-closed, with a rationale for every decision. Engine: an LLM route, or TypeSafe's Jev (`reviewer.engine`). · DSH 插件：独立复核器裁决，引擎可选 LLM 路由或 Jev。",
   "type": "module",
   "main": "./lib/index.js",

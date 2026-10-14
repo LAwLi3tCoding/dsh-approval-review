@@ -367,27 +367,26 @@ export class AccessModePreset {
       this.fail(`no loader entry for "${PERMISSION_PRESETS_PACKAGE}" to write the preset into`, undefined)
       return
     }
-    try {
-      let conflict = false
-      await editor.edit(entry, current => {
-        const presets = presetsOf(current)
-        const existing = presets[key]
-        // Never overwrite a DIFFERENT definition that happens to share the key:
-        // an operator's wording or a deployment's own knobs are not this
-        // package's to replace. The catalog said the key was absent, so this is
-        // a defence against a stale read, not the expected path.
-        if (existing !== undefined && !isDeepStrictEqual(existing, { ...SHIPPED_PRESET })) {
-          conflict = true
-          return current
-        }
-        return { ...current, presets: { ...presets, [key]: { ...SHIPPED_PRESET } } }
-      })
-      if (conflict) {
-        this.fail(`preset "${key}" already exists with a different definition; left untouched`, undefined)
-        return
+    let conflict = false
+    const written = await this.writeWithRetries(editor, entry, current => {
+      const presets = presetsOf(current)
+      const existing = presets[key]
+      // Never overwrite a DIFFERENT definition that happens to share the key:
+      // an operator's wording or a deployment's own knobs are not this
+      // package's to replace. The catalog said the key was absent, so this is
+      // a defence against a stale read, not the expected path.
+      if (existing !== undefined && !isDeepStrictEqual(existing, { ...SHIPPED_PRESET })) {
+        conflict = true
+        return current
       }
-    } catch (error) {
-      this.fail(`could not write preset "${key}" into the profile patch`, error)
+      return { ...current, presets: { ...presets, [key]: { ...SHIPPED_PRESET } } }
+    })
+    if (!written) {
+      this.fail(`could not write preset "${key}" into the profile patch`, this.lastError)
+      return
+    }
+    if (conflict) {
+      this.fail(`preset "${key}" already exists with a different definition; left untouched`, undefined)
       return
     }
     if (this.stopped) {
@@ -481,6 +480,65 @@ export class AccessModePreset {
   }
 
   /**
+   * One config write, issued OUTSIDE the caller's reload transaction.
+   *
+   * Both directions need this. A removal runs during the uninstall that tears the
+   * plugin down, and the mount-time write runs during the enable that mounts it —
+   * both are HMR transactions, and `configEditor.edit()` takes that same lock. The
+   * store is left before `edit()` is called, because the guard reads it
+   * synchronously at the top of `runExclusive`.
+   * @param editor - the config editor to write through.
+   * @param entry - the row's loader entry.
+   * @param change - the row's next config, derived from its current one.
+   * @returns a promise for the write.
+   */
+  private editOutsideTransaction(
+    editor: ConfigEditorLike,
+    entry: LoaderEntryLike,
+    change: (current: Record<string, unknown>, inherited: Record<string, unknown>) => Record<string, unknown>,
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.leaveHmrContext(() => {
+        editor.edit(entry, change).then(resolve, reject)
+      })
+    })
+  }
+
+  /**
+   * Write one row config, retrying while the transaction that holds the lock
+   * outlives the attempt. `editOutsideTransaction` queues behind that transaction
+   * rather than failing on it, but the row can still be replaced under a reload,
+   * and the editor refuses a write whose entry moved.
+   * @param editor - the config editor to write through.
+   * @param entry - the row's loader entry.
+   * @param change - the row's next config, derived from its current one.
+   * @returns true once a write succeeded; false when every attempt failed.
+   */
+  private async writeWithRetries(
+    editor: ConfigEditorLike,
+    entry: LoaderEntryLike,
+    change: (current: Record<string, unknown>, inherited: Record<string, unknown>) => Record<string, unknown>,
+  ): Promise<boolean> {
+    // The first attempt is immediate: with the transaction store left behind,
+    // `hmr.runExclusive` queues behind the running reload instead of failing, so
+    // waiting first would only delay the menu. The configured delays separate the
+    // RETRIES, which cover a row that moved under the reload.
+    for (let attempt = 0; attempt <= this.cleanupDelaysMs.length; attempt += 1) {
+      if (attempt > 0) {
+        const delay = this.cleanupDelaysMs[attempt - 1] ?? 0
+        if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
+      }
+      try {
+        await this.editOutsideTransaction(editor, entry, change)
+        return true
+      } catch (error) {
+        this.lastError = error
+      }
+    }
+    return false
+  }
+
+  /**
    * One deferred cleanup attempt, with retries.
    * @param editor - the config editor captured before disposal.
    * @param attempt - index into the configured delay list.
@@ -540,7 +598,7 @@ export class AccessModePreset {
       return true
     }
     try {
-      await editor.edit(entry, current => {
+      await this.editOutsideTransaction(editor, entry, current => {
         const presets = presetsOf(current)
         // Re-check against the live config, which is what the write replaces.
         if (!isDeepStrictEqual(presets[this.key], { ...SHIPPED_PRESET })) return current

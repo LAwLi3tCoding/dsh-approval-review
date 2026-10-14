@@ -293,6 +293,40 @@ describe('self-check', () => {
       .toEqual({ sandbox: 'danger-full-access', approval: 'ask' })
     expect(logs.some(line => line.includes('left untouched'))).toBe(true)
   })
+
+  it('writes the missing entry while the mount itself runs inside a reload transaction', async () => {
+    // An enable is an HMR transaction too, so the mount-time write has to leave
+    // the store exactly like the removal does. This is the half that failed in
+    // the field right after the uninstall half was fixed.
+    const store = new AsyncLocalStorage<boolean>()
+    const ctx = new Context()
+    const logs = captureLogs(ctx)
+    const editor = fakeEditor({ nested: store })
+    ctx.provide('configEditor', editor as never)
+    ctx.provide('hmr', { executing: store } as never)
+    const owner = new AccessModePreset(ctx, configOf(), [0, 1, 2])
+    await store.run(true, async () => {
+      await owner.attach(fakeCatalog([...BASE_KEYS]))
+    })
+    expect(owner.state()).toEqual({ kind: 'written' })
+    expect(presetsOfConfig(editor.config())[SHIPPED_PRESET_KEY]).toEqual(OWNED)
+    expect(logs.some(line => line.includes('hmr escape'))).toBe(true)
+  })
+
+  it('reports a mount-time write that could not leave the transaction', async () => {
+    const store = new AsyncLocalStorage<boolean>()
+    const ctx = new Context()
+    const logs = captureLogs(ctx)
+    const editor = fakeEditor({ nested: store })
+    ctx.provide('configEditor', editor as never)
+    const owner = new AccessModePreset(ctx, configOf(), [0, 1, 2])
+    await store.run(true, async () => {
+      await owner.attach(fakeCatalog([...BASE_KEYS]))
+    })
+    expect(owner.state().kind).toBe('failed')
+    expect(editor.calls).toHaveLength(0)
+    expect(logs.some(line => line.includes('could not write preset'))).toBe(true)
+  })
 })
 
 describe('managed entry', () => {
@@ -512,8 +546,9 @@ describe('mount wiring', () => {
     ctx.provide('configEditor', editor as never)
     ctx.provide('permissionPresets', fakeCatalog([...BASE_KEYS]) as never)
     apply(ctx, configOf())
-    // `inject` delivers the service on the microtask queue; one turn is enough.
-    await new Promise(resolve => setTimeout(resolve, 0))
+    // `inject` delivers the service on the microtask queue, and the managed write
+    // is issued immediately after it; a turn of the loop is enough for both.
+    await new Promise(resolve => setTimeout(resolve, 10))
     expect(editor.calls).toHaveLength(1)
     expect(presetsOfConfig(editor.config())[SHIPPED_PRESET_KEY]).toEqual(OWNED)
   })

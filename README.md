@@ -1,3 +1,17 @@
+## 0.6.4: the install half leaves the transaction too
+
+0.6.2 fixed only the removal direction, and the live host immediately showed the
+other half: **an enable is an HMR transaction as well**, so the mount-time write
+that restores a missing preset was rejected with `HMR transactions cannot be
+nested` (log: `access-mode preset check failed — could not write preset
+"approve-for-me"`). Both directions now share one transaction-free writer: leave
+the store through `hmr.executing.exit(...)`, then call `configEditor.edit()`,
+which QUEUES behind the running reload instead of failing. The first attempt is
+no longer delayed (the menu should not wait for it) and the retries cover a row
+that is replaced mid-reload. Two regression tests join it: a write issued while
+the mount runs inside the store must succeed, and an unleaveable context must
+report the failure.
+
 ## 0.6.3: which build is running is now in the log
 
 Diagnosing 0.6.1/0.6.2 surfaced another trap: **inside one host process a reinstalled plugin reuses the module it first imported** — a different install source or disk path changes nothing, and the mount log looked identical. A "fixed" version could therefore never have been loaded while the retest said otherwise. This release makes the running build visible (the ready line carries `v0.6.3`) and has the uninstall cleanup state whether the HMR transaction context could be left before it gives up. **Restart DSH Desktop after upgrading the plugin**; without a restart the new code is not loaded.
