@@ -1,4 +1,8 @@
-## 0.6.1: uninstall cleanup no longer fights the host's reload lock
+## 0.6.2: uninstall cleanup actually leaves the reload transaction
+
+0.6.1 only deferred the write to a timer, and the live retest still failed: the host marks "inside a transaction" with an `AsyncLocalStorage` store, and Node **propagates that store into timers created inside the transaction** — so the write stays nested however long it waits, and all three retries hit the same lock. 0.6.2 leaves the context through `hmr.executing.exit(...)` before scheduling anything (falling back to the old behaviour when that service is absent), after which `configEditor.edit()` queues on the host's own serialized path. A regression test reproduces the mechanism with a real `AsyncLocalStorage`: the unmount happens inside `store.run(true, …)` and the write still has to succeed.
+
+## 0.6.1: uninstall cleanup no longer fights the host's reload lock (**incomplete**, see 0.6.2)
 
 The first real uninstall of 0.6.0 exposed an ordering bug: the uninstall runs inside the host's HMR transaction, and writing the preset back into the profile patch takes that same lock, so the deletion failed with `HMR transactions cannot be nested` and the menu kept "Approve for me". The removal now runs outside the transaction and retries (0.25s / 1s / 3s); only three blocked attempts leave the entry behind, with an explicit warning in the log and in `/approval-review status`.
 

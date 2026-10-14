@@ -14,6 +14,7 @@
  * @module dsh-approval-review/tests/access-mode-preset
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -96,8 +97,9 @@ interface FakeEditor extends ConfigEditorLike {
  * A `configEditor` stand-in that keeps the row's config in memory and records
  * every write, which is what the assertions read.
  * @param options - the row's starting config, its profile-patch override, the
- *   patch path to report, an optional failure to throw from `edit`, and how many
- *   leading `edit` calls should fail the way a nested HMR transaction does.
+ *   patch path to report, an optional failure to throw from `edit`, how many
+ *   leading `edit` calls should fail the way a nested HMR transaction does, and
+ *   the transaction store a real host would report as "inside a transaction".
  * @returns the editor plus its recorded state.
  */
 function fakeEditor(options: {
@@ -106,6 +108,7 @@ function fakeEditor(options: {
   documentPath?: string
   fail?: Error
   failFirst?: number
+  nested?: AsyncLocalStorage<boolean>
 } = {}): FakeEditor {
   const inherited = options.inherited ?? { presets: { ...BASE_PRESETS } }
   let current: Record<string, unknown> = inherited
@@ -125,6 +128,12 @@ function fakeEditor(options: {
     async edit(_entry, change) {
       attempts += 1
       if (options.fail !== undefined) throw options.fail
+      // The host's real guard, reproduced exactly: `hmr.runExclusive()` rejects
+      // whenever the CALLING async context still carries the transaction store,
+      // and Node propagates that store into timers created inside it.
+      if (options.nested?.getStore() === true) {
+        throw new Error('HMR transactions cannot be nested')
+      }
       if (failuresLeft > 0) {
         failuresLeft -= 1
         // The exact rejection the first live uninstall hit.
@@ -185,10 +194,12 @@ async function mounted(options: {
   config?: Record<string, unknown>
   presets?: PermissionPresetsLike
   editor?: ConfigEditorLike
+  hmr?: unknown
 } = {}): Promise<{ owner: AccessModePreset; ctx: Context; logs: string[] }> {
   const ctx = new Context()
   const logs = captureLogs(ctx)
   if (options.editor !== undefined) ctx.provide('configEditor', options.editor as never)
+  if (options.hmr !== undefined) ctx.provide('hmr', options.hmr as never)
   const owner = new AccessModePreset(ctx, configOf(options.config), [0, 1, 2])
   if (options.presets !== undefined) await owner.attach(options.presets)
   return { owner, ctx, logs }
@@ -385,6 +396,59 @@ describe('uninstall cleanup', () => {
       editor,
     })
     await owner.detach()
+    await settle()
+    expect(editor.attempts).toBe(3)
+    expect(presetsOfConfig(editor.config())[SHIPPED_PRESET_KEY]).toEqual(OWNED)
+    expect(logs.some(line => line.includes('could not remove access-mode preset'))).toBe(true)
+  })
+
+  it('leaves the reload transaction context before the deferred write', async () => {
+    // The real mechanism: the host marks "inside an HMR transaction" with an
+    // AsyncLocalStorage store, and Node carries that store into every timer the
+    // transaction creates — so a deferred write is rejected as nested however
+    // long it waits. Unmounting inside `store.run(...)` models the uninstall.
+    const store = new AsyncLocalStorage<boolean>()
+    const documentPath = await profileWith([])
+    const editor = fakeEditor({
+      documentPath,
+      nested: store,
+      override: { presets: { ...BASE_PRESETS, [SHIPPED_PRESET_KEY]: OWNED } },
+      inherited: { presets: { ...BASE_PRESETS, [SHIPPED_PRESET_KEY]: OWNED } },
+    })
+    const { owner, logs } = await mounted({
+      presets: fakeCatalog([...BASE_KEYS, SHIPPED_PRESET_KEY]),
+      editor,
+      hmr: { executing: store },
+    })
+    expect(owner.state()).toEqual({ kind: 'adopted' })
+    await store.run(true, async () => {
+      await owner.detach()
+    })
+    await settle()
+    expect(editor.attempts).toBe(1)
+    expect(presetsOfConfig(editor.config())[SHIPPED_PRESET_KEY]).toBeUndefined()
+    expect(logs.some(line => line.includes('removed access mode'))).toBe(true)
+  })
+
+  it('reports the leftover when the transaction context cannot be left', async () => {
+    // No `hmr` service to leave through: the deferred write keeps the caller's
+    // context, so the guard keeps rejecting. The plugin must say so, not fail
+    // silently — this is the fallback, not the expected path.
+    const store = new AsyncLocalStorage<boolean>()
+    const documentPath = await profileWith([])
+    const editor = fakeEditor({
+      documentPath,
+      nested: store,
+      override: { presets: { ...BASE_PRESETS, [SHIPPED_PRESET_KEY]: OWNED } },
+      inherited: { presets: { ...BASE_PRESETS, [SHIPPED_PRESET_KEY]: OWNED } },
+    })
+    const { owner, logs } = await mounted({
+      presets: fakeCatalog([...BASE_KEYS, SHIPPED_PRESET_KEY]),
+      editor,
+    })
+    await store.run(true, async () => {
+      await owner.detach()
+    })
     await settle()
     expect(editor.attempts).toBe(3)
     expect(presetsOfConfig(editor.config())[SHIPPED_PRESET_KEY]).toEqual(OWNED)

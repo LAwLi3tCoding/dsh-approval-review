@@ -122,6 +122,22 @@ export interface ConfigEditorLike {
 }
 
 /**
+ * The part of the host's `hmr` service this plugin needs: the escape hatch out of
+ * a running reload transaction.
+ *
+ * `runExclusive` marks "inside a transaction" with an `AsyncLocalStorage` store,
+ * and Node carries that store into anything the transaction creates. Leaving it
+ * is what lets a deferred write be accepted instead of rejected as nested.
+ */
+export interface HmrLike {
+  /** The transaction store; absent on a service that does not expose it. */
+  readonly executing?: {
+    /** Run `fn` with an empty store — the documented way out of the context. */
+    exit<T>(fn: () => T): T
+  }
+}
+
+/**
  * The preset this package owns.
  *
  * MUST stay byte-identical to the `approve-for-me` entry in this package's
@@ -406,7 +422,35 @@ export class AccessModePreset {
       this.warnOrphan(new Error('no configEditor service to write through'))
       return
     }
-    this.scheduleCleanup(editor, 0)
+    // Leave the transaction BEFORE anything is scheduled — see `leaveHmrContext`.
+    this.leaveHmrContext(() => this.scheduleCleanup(editor, 0))
+  }
+
+  /**
+   * Start `run` with the host's HMR transaction context LEFT BEHIND.
+   *
+   * `hmr.runExclusive()` refuses to nest by reading an `AsyncLocalStorage` store,
+   * and Node propagates that store into everything created inside the
+   * transaction — including a `setTimeout` scheduled from `dispose`. A deferred
+   * write therefore stays "nested" however long it waits: 0.6.1's 250ms / 1s / 3s
+   * retries all failed with the same rejection. The store has to be left BEFORE
+   * the first timer exists, and the service that owns it is the only handle on it.
+   * Without that service the work still runs: it simply keeps the caller's
+   * context, which is correct for a mount that never happened inside a reload.
+   * @param run - work to start outside the transaction.
+   */
+  private leaveHmrContext(run: () => void): void {
+    const hmr = serviceOf<HmrLike>(this.ctx, 'hmr')
+    const executing = hmr?.executing
+    if (executing === undefined || typeof executing.exit !== 'function') {
+      run()
+      return
+    }
+    try {
+      executing.exit(run)
+    } catch {
+      run()
+    }
   }
 
   /**
