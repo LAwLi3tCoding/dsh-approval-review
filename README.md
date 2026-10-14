@@ -1,3 +1,7 @@
+## 0.6.3: which build is running is now in the log
+
+Diagnosing 0.6.1/0.6.2 surfaced another trap: **inside one host process a reinstalled plugin reuses the module it first imported** — a different install source or disk path changes nothing, and the mount log looked identical. A "fixed" version could therefore never have been loaded while the retest said otherwise. This release makes the running build visible (the ready line carries `v0.6.3`) and has the uninstall cleanup state whether the HMR transaction context could be left before it gives up. **Restart DSH Desktop after upgrading the plugin**; without a restart the new code is not loaded.
+
 ## 0.6.2: uninstall cleanup actually leaves the reload transaction
 
 0.6.1 only deferred the write to a timer, and the live retest still failed: the host marks "inside a transaction" with an `AsyncLocalStorage` store, and Node **propagates that store into timers created inside the transaction** — so the write stays nested however long it waits, and all three retries hit the same lock. 0.6.2 leaves the context through `hmr.executing.exit(...)` before scheduling anything (falling back to the old behaviour when that service is absent), after which `configEditor.edit()` queues on the host's own serialized path. A regression test reproduces the mechanism with a real `AsyncLocalStorage`: the unmount happens inside `store.run(true, …)` and the write still has to succeed.

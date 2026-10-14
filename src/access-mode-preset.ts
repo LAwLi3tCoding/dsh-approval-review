@@ -251,6 +251,12 @@ export class AccessModePreset {
    * after the mounting context is disposed, and reporting must not depend on it.
    */
   private readonly log: Logger
+  /**
+   * The host's transaction store, captured while the `hmr` service is definitely
+   * reachable. The cleanup needs it after this plugin's context is on its way
+   * out, and a lookup at that moment is what failed in the field.
+   */
+  private hmrExecuting: HmrLike['executing']
 
   /**
    * @param ctx - the mounting context, used for service lookups.
@@ -263,6 +269,16 @@ export class AccessModePreset {
     private readonly cleanupDelaysMs: readonly number[] = CLEANUP_DELAYS_MS,
   ) {
     this.log = ctx.logger('dsh-approval-review')
+    this.captureHmrStore()
+  }
+
+  /** Remember the transaction store while the service is still in scope. */
+  private captureHmrStore(): void {
+    try {
+      this.hmrExecuting = serviceOf<HmrLike>(this.ctx, 'hmr')?.executing ?? this.hmrExecuting
+    } catch {
+      // A lookup that throws is the same as no lookup: the escape stays absent.
+    }
   }
 
   /** The gate key this deployment configured; empty means "any access mode". */
@@ -303,6 +319,8 @@ export class AccessModePreset {
   /** {@link attach}, with the crash guard lifted so the branches stay readable. */
   private async attachChecked(service: PermissionPresetsLike): Promise<void> {
     if (this.stopped) return
+    // The service may have arrived after construction; take the store now too.
+    this.captureHmrStore()
     const key = this.key
     if (key.length === 0) {
       this.observed = { kind: 'any-mode' }
@@ -440,8 +458,17 @@ export class AccessModePreset {
    * @param run - work to start outside the transaction.
    */
   private leaveHmrContext(run: () => void): void {
-    const hmr = serviceOf<HmrLike>(this.ctx, 'hmr')
-    const executing = hmr?.executing
+    const service = serviceOf<HmrLike>(this.ctx, 'hmr')
+    const executing = this.hmrExecuting ?? service?.executing
+    // One line, at info level, because this is the step that silently failed twice
+    // in the field: it names whether the store was reachable and how.
+    this.log.info(
+      'access-mode cleanup: hmr escape '
+      + `${executing === undefined ? 'UNAVAILABLE' : this.hmrExecuting === undefined ? 'via lookup' : 'via captured reference'}`
+      + ` (service=${service === undefined ? 'absent' : 'present'}`
+      + `, executing=${executing === undefined ? 'absent' : typeof executing}`
+      + `, exit=${typeof executing?.exit})`,
+    )
     if (executing === undefined || typeof executing.exit !== 'function') {
       run()
       return

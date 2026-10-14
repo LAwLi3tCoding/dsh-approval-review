@@ -24,6 +24,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { readFileSync } from 'node:fs'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
@@ -72,6 +73,25 @@ function reviewerLabels(config: ConfigShape): { readonly provider: string; reado
 /** Whether the configured environment variable currently holds a non-empty value. */
 function reviewerKeyInEnvironment(config: ConfigShape): boolean {
   return (process.env[config.reviewer.jev.apiKeyEnv] ?? '').trim().length > 0
+}
+
+/**
+ * This package's version, read from the manifest beside the built module.
+ *
+ * The ready line carries it because a host can keep serving an already imported
+ * module for a reinstalled row: a reinstalled plugin that still reports the old
+ * version is how that shows up, instead of being mistaken for a working deploy.
+ * @returns the version, or `unknown` when the manifest cannot be read.
+ */
+function packageVersion(): string {
+  try {
+    const parsed = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version?: unknown
+    }
+    return typeof parsed.version === 'string' ? parsed.version : 'unknown'
+  } catch {
+    return 'unknown'
+  }
 }
 
 /**
@@ -378,7 +398,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
     projectionCtx.sessionProjections.register({ ...runtime.projection() })
   })
   ctx.logger('dsh-approval-review').info(
-    `automatic approval review ready (reviewTools: ${config.reviewTools.join(', ') || 'none'}, default: ${config.defaultPolicy})`,
+    `automatic approval review ready (v${packageVersion()}, reviewTools: ${config.reviewTools.join(', ') || 'none'}, default: ${config.defaultPolicy})`,
   )
 }
 
