@@ -28,7 +28,7 @@ export type SubagentStopReason =
 /** The settled outcome of one one-shot child run. */
 export interface SubagentResultSubset {
   /** The child's final assistant output. */
-  readonly output: ContentBlock[]
+  readonly output: readonly ContentBlock[]
   /** The validated structured value when an `outputSchema` was requested. */
   readonly structured?: unknown
   /** Provider-authored failure detail for a non-`completed` run. */
@@ -79,7 +79,16 @@ export interface SubagentStarter {
    * @param request - the start request.
    * @returns the published run handle.
    */
-  start(name: string, request: SubagentStartRequestSubset): Promise<SubagentRunSubset>
+  start?(name: string, request: SubagentStartRequestSubset): Promise<SubagentRunSubset>
+  /** Modern host activation API; a reserved identity requires a local backend. */
+  startActivation?(spec: {
+    readonly provider: string
+    readonly label: string
+    readonly childId: string
+    readonly request: Omit<SubagentStartRequestSubset, 'label' | 'signal' | 'persona' | 'toolFilter'>
+    readonly signal: AbortSignal
+    readonly delivery: 'caller'
+  }): Promise<{ readonly childId: string; readonly result: Promise<SubagentResultSubset>; dispose(): Promise<void> }>
 }
 
 // Aliases keep the reviewer implementation readable.

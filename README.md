@@ -1,3 +1,11 @@
+## DSH 0.2.2 compatibility
+
+The source build now targets DSH **0.2.2-rc.1** with actual host API tests, updated
+tool-result handling, and a read-only subagent adapter. DSH 0.3 prereleases are
+explicitly excluded. See [compatibility and verification](docs/dsh-compatibility.md).
+Install the updated GitHub build and restart DSH; this change does not publish a
+new npm release.
+
 ## 0.6.4: the install half leaves the transaction too
 
 0.6.2 fixed only the removal direction, and the live host immediately showed the

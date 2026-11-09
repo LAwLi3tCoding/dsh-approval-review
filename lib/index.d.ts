@@ -2,7 +2,6 @@ import Schema from "@deepseek-ai/schemastery";
 import { Context } from "@deepseek-ai/cordis";
 import "@deepseek-ai/dsh-session";
 import "@deepseek-ai/dsh-session-projection";
-//#region src/review-types.d.ts
 /**
  * Domain vocabulary for the approval-review capability: how an approval request
  * is classified, what the reviewer answered, and the record that the audit card
@@ -23,8 +22,6 @@ type ToolPolicy = 'ai' | 'human' | 'never';
 /** Risk grades a reviewer may report, ordered from least to most dangerous. */
 type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
 type UserAuthorization = 'high' | 'medium' | 'low' | 'unknown';
-//#endregion
-//#region src/config.d.ts
 /** How the plugin reacts to a reviewer verdict that exceeds the risk threshold. */
 type RiskGateAction = 'allow' | 'delegate' | 'deny';
 /** How the plugin reacts when the reviewer cannot decide. */
@@ -252,8 +249,6 @@ interface Config {
 }
 /** Schema for {@link Config}; the loader validates against this at mount time. */
 declare const Config: Schema<Config>;
-//#endregion
-//#region src/audit.d.ts
 /** One rendered audit entry. Every field is plain JSON. */
 interface AuditRecord {
   /** Fresh id minted when the request was reviewed. */
@@ -400,8 +395,6 @@ declare function auditView(state: AuditState, defaults: {
   /** `reviewer.jev.allowEgress`: whether a session may switch to Jev at all. */
   readonly defaultJevPermitted: boolean;
 }): AuditView;
-//#endregion
-//#region src/output-language.d.ts
 /** A language this plugin can emit prose in. */
 type OutputLanguage = 'en' | 'zh';
 /** The `language` setting: an explicit language, or follow the harness. */
@@ -416,8 +409,6 @@ type LanguageSetting = OutputLanguage | 'auto';
 declare function outputIsZh(ctx: Context, config: {
   readonly language: LanguageSetting;
 }): boolean;
-//#endregion
-//#region src/index.d.ts
 declare const name = "approval-review";
 /**
  * Consumers: the `/approval-review` command and the LLM seam the reviewer calls.
@@ -429,5 +420,4 @@ declare const inject: string[];
 declare function emptyView(config: Config): ReturnType<typeof auditView>;
 /** Register the answerer, the rationale carrier, the command, and the card feed. */
 declare function apply(ctx: Context, config: Config): void;
-//#endregion
 export { Config, type Config as ConfigShape, apply, emptyView, inject, name, outputIsZh };

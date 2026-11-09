@@ -16,6 +16,14 @@ import type { RiskLevel, ReviewVerdict } from './review-types.ts'
 import { INSPECTION_TOOL } from './inspection.ts'
 import { RISK_LEVELS } from './review-types.ts'
 
+// DSH 0.2 owns message provenance through an extensible producer vocabulary.
+// Declare our source instead of relying on the removed catch-all `plugin` kind.
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'approval-review': { kind: 'approval-review' }
+  }
+}
+
 /**
  * Key names whose values are replaced before anything reaches the reviewer.
  * Matching is done on word-ish boundaries rather than by bare substring, because
@@ -404,7 +412,7 @@ export function buildReviewerUserMessage(evidence: ReviewEvidence): Message {
   ]
   return createUserMessage({
     content: [{ type: 'text', text: body.join('\n') }],
-    source: { kind: 'plugin', plugin: 'dsh-approval-review' },
+    source: { kind: 'approval-review' },
   })
 }
 

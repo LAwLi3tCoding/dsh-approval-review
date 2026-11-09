@@ -9,19 +9,20 @@
  * instead of guesses from the argument text.
  *
  * Safety is structural, not prompt-based:
- * - the child's tool face is restricted with `toolFilter`, so the named tools
- *   vanish from its prompt AND refuse to execute (one visibility);
+ * - the legacy child's `toolFilter`, or modern scoped visibility restriction
+ *   and execution guard, prevents every tool outside the read-only allow-list;
  * - maxDepth is parentDepth + 1; tools cannot delegate further;
  * - it has no write or exec tool, so a compromised reviewer cannot act on the
  *   boundary it is guarding;
- * - a child that exists for the duration of a review is REGISTERED with the
- *   runtime as soon as `start()` resolves, before its first step can ask, and
+ * - modern child identities are registered BEFORE creation, while legacy
+ *   handles are registered as soon as `start()` resolves, and
  *   its own approval requests are delegated — so a deployment that widens
  *   `reviewer.tools` still cannot make the reviewer's asks recurse into the
  *   answerer it serves.
  * @module dsh-approval-review/subagent-reviewer
  */
 
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
@@ -91,7 +92,7 @@ function childText(blocks: readonly ContentBlock[]): string {
   const walk = (list: readonly ContentBlock[]): void => {
     for (const block of list) {
       if (block.type === 'text') out.push(block.text)
-      else if (block.type === 'tool-result') walk(block.content)
+
     }
   }
   walk(blocks)
@@ -147,7 +148,7 @@ export async function runSubagentReviewer(
     ...input.outputLanguage === undefined ? {} : { outputLanguage: input.outputLanguage },
     exactActionApproval: input.exactActionApproval === true,
   })
-  const prompt: ContentBlock[] = evidence.content
+  const prompt: ContentBlock[] = [...evidence.content]
   const controller = new AbortController()
 
   const readTools = input.reviewerTools.filter(tool => ['read', 'glob', 'grep'].includes(tool))
@@ -194,6 +195,7 @@ export async function runSubagentReviewer(
   let releaseChild: (() => void) | undefined
   let timedOut = false
   let finished = false
+  let startPending = false
   let rejectDeadline!: (error: Error) => void
   const deadline = new Promise<never>((_resolve, reject) => { rejectDeadline = reject })
   const cancel = (): void => {
@@ -207,13 +209,67 @@ export async function runSubagentReviewer(
     rejectDeadline(new Error(`reviewer timed out after ${input.timeoutMs} ms`))
   }, input.timeoutMs)
   try {
-    const pending = subagents.start(input.reviewerProvider, request).then(handle => {
+    // Modern hosts reserve local child identities and await agent/created before
+    // releasing queued input. Install both hard tool scope and reviewer policy
+    // there, rather than passing obsolete request fields the host ignores.
+    const start = async (): Promise<SubagentRun> => {
+      if (typeof subagents.startActivation !== 'function') {
+        if (typeof subagents.start !== 'function') throw new Error('unsupported subagents service: no safe start API')
+        return subagents.start(input.reviewerProvider, request)
+      }
+      const childId = randomUUID()
+      releaseChild = input.registerChildSession?.(childId)
+      let initialized = false
+      const disposeListener = ctx.on('agent/created', ({ agent }): undefined => {
+        if (String(agent.id) !== childId) return
+        // A late start must fail before any model/tool work can be released.
+        controller.signal.throwIfAborted()
+        const allowed = new Set(request.toolFilter!.allow)
+        agent.ctx.tools.restrict({ allow: [...allowed] })
+        // Scoped registrations can survive restrict(); a monotone execution
+        // guard also blocks later-added local tools and nested dispatch.
+        agent.ctx.tools.guard(exec => allowed.has(exec.name) ? undefined : 'Approval reviewer is read-only: this tool is not permitted.')
+        // Keep these modern-only options structural so the legacy start branch
+        // can still be compiled with older host types that lack interpolation.
+        const reviewerSection = {
+          name: 'deployment:persona-prefix',
+          order: agent.ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX'),
+          text: persona,
+          complete: true,
+          interpolate: false,
+        }
+        agent.ctx.systemPrompt.section(reviewerSection)
+        initialized = true
+        return undefined
+      }, { prepend: true })
+      try {
+        const { label, signal: _signal, persona: _persona, toolFilter: _filter, ...activationRequest } = request
+        const activation = await subagents.startActivation({
+          provider: input.reviewerProvider, label: label ?? 'approval-review', childId,
+          request: activationRequest, signal: controller.signal, delivery: 'caller',
+        })
+        if (!initialized || activation.childId !== childId) {
+          await activation.dispose()
+          throw new Error('reviewer child did not establish its read-only scope and policy before activation')
+        }
+        return { id: activation.childId, result: activation.result, dispose: () => activation.dispose() }
+      } finally {
+        disposeListener()
+      }
+    }
+    startPending = true
+    const pending = start().then(handle => {
+      startPending = false
       // A provider may ignore cancellation while starting. Dispose late handles
       // without delaying the parent approval or leaking a child.
-      if (finished) { void handle.dispose().catch(() => undefined); return handle }
+      if (finished) { void handle.dispose().catch(() => undefined).finally(() => releaseChild?.()); return handle }
       run = handle
-      releaseChild = input.registerChildSession?.(handle.id)
+      releaseChild ??= input.registerChildSession?.(handle.id)
       return handle
+    }, error => {
+      startPending = false
+      if (finished) releaseChild?.()
+      throw error
     })
     const raced = await Promise.race([pending, deadline])
     const result = await Promise.race([raced.result, deadline])
@@ -257,6 +313,6 @@ export async function runSubagentReviewer(
     // Keep its reviewer identity until disposal actually settles.
     if (run !== undefined) {
       void run.dispose().catch(() => undefined).finally(() => releaseChild?.())
-    } else releaseChild?.()
+    } else if (!startPending) releaseChild?.()
   }
 }

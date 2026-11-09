@@ -9,6 +9,12 @@
 
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { createScope, type Scope } from '@deepseek-ai/dsh-scope'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import ToolsService, { type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import * as NativeExecutor from '@deepseek-ai/dsh-tool-executor-native'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   runSubagentReviewer,
@@ -280,4 +286,174 @@ describe('reviewer isolation', () => {
     await runSubagentReviewer(mounted(stub), input({ parent: nested }))
     expect(stub.calls[0]!.request.maxDepth).toBe(4)
   })
+})
+
+/** Models the documented serial creation barrier, not the model/provider itself. */
+function modernHost(options: { failScope?: boolean; omitLifecycle?: boolean; holdDisposal?: Promise<void>; holdStartup?: Promise<void> } = {}) {
+  const ctx = new Context()
+  let allowed: readonly string[] | undefined
+  let policy = ''
+  let guard: ((exec: { name: string }) => string | undefined) | undefined
+  let steps = 0
+  let disposed = false
+  let rolledBack = false
+  let specSeen: Parameters<NonNullable<SubagentStarter['startActivation']>>[0] | undefined
+  const service: SubagentStarter = {
+    async startActivation(spec) {
+      specSeen = spec
+      await options.holdStartup
+      const child = {
+        id: spec.childId,
+        ctx: {
+          tools: { restrict(filter: { allow: readonly string[] }) {
+            if (options.failScope) throw new Error('scope installation failed')
+            allowed = filter.allow
+          }, guard(check: (exec: { name: string }) => string | undefined) { guard = check } },
+          systemPrompt: {
+            getSectionOrder: () => 10,
+            section(section: { text: string }) { policy = section.text },
+          },
+        },
+      } as unknown as Agent
+      try {
+        if (!options.omitLifecycle) await ctx.serial('agent/created', { agent: child, source: 'create' } as never)
+      } catch (error) { rolledBack = true; throw error }
+      if (!options.omitLifecycle) {
+        // A step is released only after every listener completed.
+        expect(allowed).toEqual(['read', 'glob', 'grep'])
+        expect(policy).toContain('JSON')
+        steps += 1
+      }
+      return {
+        childId: spec.childId,
+        result: Promise.resolve({ output: [{ type: 'text' as const, text: '{"decision":"allow","risk":"low","reason":"safe"}' }], stopReason: 'completed' }),
+        async dispose() { await options.holdDisposal; disposed = true },
+      }
+    },
+  }
+  ctx.provide('subagents', service as never)
+  return {
+    ctx,
+    get spec() { return specSeen },
+    get steps() { return steps },
+    get disposed() { return disposed },
+    get rolledBack() { return rolledBack },
+    execute(name: string) { if (guard?.({ name }) !== undefined) throw new Error('tool denied'); return name },
+  }
+}
+
+describe('modern subagent activation isolation', () => {
+  it('installs policy and read-only scope before first step, with caller-only delivery', async () => {
+    const host = modernHost()
+    const registered: string[] = []
+    const result = await runSubagentReviewer(host.ctx, input({ registerChildSession: id => { registered.push(id); return () => {} } }))
+    expect(result.verdict?.decision).toBe('allow')
+    expect(host.steps).toBe(1)
+    expect(host.spec?.delivery).toBe('caller')
+    expect(host.spec?.childId).toBe(registered[0])
+    expect(host.spec?.request).not.toHaveProperty('persona')
+    expect(host.spec?.request).not.toHaveProperty('toolFilter')
+    expect(host.execute('read')).toBe('read')
+    expect(() => host.execute('bash')).toThrow('tool denied')
+    expect(() => host.execute('write')).toThrow('tool denied')
+    expect(() => host.execute('subagent')).toThrow('tool denied')
+  })
+
+  it('fails creation before any step when hard scoping throws', async () => {
+    const host = modernHost({ failScope: true })
+    const result = await runSubagentReviewer(host.ctx, input())
+    expect(result.verdict).toBeUndefined()
+    expect(result.failure).toContain('scope installation failed')
+    expect(host.rolledBack).toBe(true)
+    expect(host.steps).toBe(0)
+  })
+
+  it('does not trust an activation that skipped the initialization barrier', async () => {
+    const host = modernHost({ omitLifecycle: true })
+    const result = await runSubagentReviewer(host.ctx, input())
+    expect(result.verdict).toBeUndefined()
+    expect(result.failure).toContain('read-only scope')
+    expect(host.disposed).toBe(true)
+  })
+
+  it('keeps recursion protection until child disposal settles', async () => {
+    let settle!: () => void
+    let released = false
+    const host = modernHost({ holdDisposal: new Promise<void>(resolve => { settle = resolve }) })
+    await runSubagentReviewer(host.ctx, input({ registerChildSession: () => () => { released = true } }))
+    expect(released).toBe(false)
+    settle()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(released).toBe(true)
+  })
+})
+
+
+it('rejects a late modern creation after timeout before model work and retains recursion guard until then', async () => {
+  let start!: () => void
+  let released = false
+  const host = modernHost({ holdStartup: new Promise<void>(resolve => { start = resolve }) })
+  const result = await runSubagentReviewer(host.ctx, input({
+    timeoutMs: 5, registerChildSession: () => () => { released = true },
+  }))
+  expect(result.failure).toContain('timed out')
+  expect(released).toBe(false)
+  start()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  expect(host.steps).toBe(0)
+  expect(host.rolledBack).toBe(true)
+  expect(released).toBe(true)
+})
+
+
+it('enforces latest real scoped tools guard through native dispatch without changing parent capabilities', async () => {
+  const ctx = new Context()
+  await ctx.plugin(SystemPrompt, {})
+  await ctx.plugin(ToolsService)
+  await ctx.plugin(NativeExecutor)
+  let writes = 0
+  const tool = (name: string): ToolDefinition => ({
+    name, description: name, parameters: { type: 'object', properties: {} },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+    async execute() { if (name === 'write') writes += 1; return name },
+  })
+  for (const name of ['read', 'glob', 'grep', 'write']) ctx.tools.register(tool(name))
+  let scope: Scope | undefined
+  const service: SubagentStarter = {
+    async startActivation(spec) {
+      const child = { id: spec.childId } as unknown as Agent
+      await ctx.plugin(Object.assign((inner: Context) => {
+        scope = createScope(inner, child)
+        Object.assign(child, { ctx: scope.ctx })
+      }, { inject: ['tools', 'systemPrompt'] }))
+      await ctx.serial('agent/created', { agent: child, source: 'create' } as never)
+      // A new own-scope tool bypasses the inherited visibility filter, so the
+      // execution guard, rather than prompt hiding, must stop its body.
+      scope!.ctx.tools.register(tool('write'))
+      const dispatch = (name: string, agent?: Agent) => executeModelToolFixture(ctx, {
+        name, arguments: {}, callId: ToolCallId(`call-${name}`),
+        signal: new AbortController().signal, ...(agent ? { agent } : {}),
+      })
+      const denied = await dispatch('write', child)
+      expect(denied.isError).toBe(true)
+      expect(JSON.stringify(denied.content)).toContain('read-only')
+      expect(writes).toBe(0)
+      expect((await dispatch('read', child)).isError).toBeFalsy()
+      expect((await dispatch('write')).isError).toBeFalsy()
+      expect(writes).toBe(1)
+      const assembly = await ctx.systemPrompt.assemble({ scope: child })
+      expect(JSON.stringify(assembly)).toContain('JSON')
+      expect(assembly.sections).toHaveLength(1)
+      expect(assembly.sections[0]?.name).toBe('deployment:persona-prefix')
+      return {
+        childId: spec.childId,
+        result: Promise.resolve({ output: [{ type: 'text' as const, text: '{"decision":"allow","risk":"low","reason":"safe"}' }], stopReason: 'completed' }),
+        async dispose() { await scope?.dispose() },
+      }
+    },
+  }
+  ctx.provide('subagents', service as never)
+  const result = await runSubagentReviewer(ctx, input())
+  expect(result.failure).toBeUndefined()
+  expect(result.verdict?.decision).toBe('allow')
 })

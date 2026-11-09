@@ -13,6 +13,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { LlmAdapter, LlmRuntime, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import { apply, Config } from '../src/index.ts'
@@ -55,16 +56,18 @@ function fakeAgent(seed: Array<{ type: string; data?: Record<string, unknown> }>
   { type: 'turn/start', data: { turn: 1 } },
 ]): { agent: Agent; appended: Appended[]; events: Array<{ type: string; data?: Record<string, unknown> }> } {
   const appended: Appended[] = []
-  const events: Array<{ type: string; data?: Record<string, unknown> }> = [...seed]
+  const events = seed.map((event, seq) => ({ ...event, seq }))
   const agent = {
     options: { provider: 'test', model: 'test-model' },
     session: {
       id: 'session-1',
       header: { id: 'session-1', title: undefined },
+      inheritedEventCount: 0,
       get seq() { return events.length },
       eventAt: (seq: number) => events[seq],
+      snapshotEvents: () => [...events],
       append: (type: string, data: Record<string, unknown>) => {
-        const event = { type, data }
+        const event = { type, data, seq: events.length }
         events.push(event)
         appended.push(event)
         return event as unknown as SessionEvent
@@ -81,6 +84,7 @@ async function mounted(overrides: Record<string, unknown> = {}): Promise<{
   config: ConfigShape
 }> {
   const ctx = new Context()
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(ApprovalService)
   await ctx.plugin(CommandRuntime)
   const reviewer = new ScriptedReviewer()
@@ -112,7 +116,15 @@ function requestOf(agent: Agent, toolName: string, callId = 'call-1', reason?: s
  * the cast keeps the stand-in readable without weakening production types.
  */
 function emitSessionEvent(ctx: Context, session: unknown, event: unknown): void {
-  ;(ctx.emit as unknown as (name: string, session: unknown, event: unknown) => void)('session/event', session, event)
+  const log = session as {
+    snapshotEvents(): Array<{ type: string; data?: Record<string, unknown>; seq: number }>
+    append(type: string, data: Record<string, unknown>): unknown
+  }
+  const requested = event as { type: string; data?: Record<string, unknown> }
+  const committed = log.snapshotEvents().find(candidate =>
+    candidate === event || (candidate.type === requested.type && JSON.stringify(candidate.data) === JSON.stringify(requested.data)),
+  ) ?? log.append(requested.type, requested.data ?? {})
+  ;(ctx.emit as unknown as (name: string, session: unknown, event: unknown) => void)('session/event', session, committed)
 }
 
 /**
@@ -436,6 +448,7 @@ describe('approval audit trail', () => {
 
   it('delegates instead of crashing when no reviewer route can be resolved', async () => {
     const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(ApprovalService)
     await ctx.plugin(CommandRuntime)
     const reviewer = new ScriptedReviewer()
@@ -774,6 +787,7 @@ describe('reviewer failure budget', () => {
     // the reviewer cannot run — and with `onReviewerFailure: rejected` the
     // deployment refuses rather than asking.
     const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(ApprovalService)
     await ctx.plugin(CommandRuntime)
     const reviewer = new ScriptedReviewer()
@@ -836,7 +850,7 @@ describe('complete action evidence', () => {
 })
 
 describe('stop-on-rejection breaker', () => {
-  it('cancels only after the refused tool result is committed and preserves queued input', async () => {
+  it.each(['legacy', 'current'])('cancels only after the refused %s tool result is committed and preserves queued input', async shape => {
     const { ctx, reviewer } = await mounted({ circuitBreaker: { consecutiveDenials: 1, action: 'stop' } })
     reviewer.answer = '{"decision":"deny","risk":"high","reason":"outside authorization"}'
     const { agent } = fakeAgent(withToolCall(fakeAgent().agent, 'c', 'bash', '{"command":"unsafe"}'))
@@ -844,7 +858,12 @@ describe('stop-on-rejection breaker', () => {
     agent.cancel = (cause, options) => { cancellations.push({ cause, options }) }
     expect(await ctx.approval.request(requestOf(agent, 'bash', 'c'))).toBe('rejected')
     expect(cancellations).toHaveLength(0)
-    emitSessionEvent(ctx, agent.session, { type: 'tool/result', data: { message: { content: [{ type: 'tool-result', toolCallId: 'c', content: [{ type: 'text', text: 'refused' }] }] } } })
+    const result = (callId: string) => shape === 'current'
+      ? { role: 'tool', source: { kind: 'tool', callId }, toolCallId: callId, content: [{ type: 'text', text: 'refused' }] }
+      : { content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: 'refused' }] }] }
+    emitSessionEvent(ctx, agent.session, { type: 'tool/result', data: { message: result('unrelated') } })
+    expect(cancellations).toHaveLength(0)
+    emitSessionEvent(ctx, agent.session, { type: 'tool/result', data: { message: result('c') } })
     expect(cancellations).toEqual([{ cause: { kind: 'hook', reason: 'approval reviewer rejection circuit breaker' }, options: { keepInbox: true } }])
   })
 })

@@ -18,7 +18,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import { apply, Config } from '../src/index.ts'
@@ -430,8 +430,12 @@ describe('uninstall cleanup', () => {
       editor,
     })
     await owner.detach()
-    await settle()
-    expect(editor.attempts).toBe(3)
+    // Wait for the actual terminal state, not three timers fitting into a
+    // 30 ms wall-clock sleep while the rest of the suite runs concurrently.
+    await vi.waitFor(() => {
+      expect(editor.attempts).toBe(3)
+      expect(logs.some(line => line.includes('could not remove access-mode preset'))).toBe(true)
+    })
     expect(presetsOfConfig(editor.config())[SHIPPED_PRESET_KEY]).toEqual(OWNED)
     expect(logs.some(line => line.includes('could not remove access-mode preset'))).toBe(true)
   })

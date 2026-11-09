@@ -1,3 +1,7 @@
+## DSH 0.2.2 兼容
+
+源码构建现以 **DSH 0.2.2-rc.1** 为开发与测试目标，适配真实宿主 API、工具结果消息和只读子代理接口，并明确拒绝 0.3 预发布版。详见[兼容性与验证说明](docs/dsh-compatibility.md)。安装更新后的 GitHub 构建后需重启 DSH；本次修改不代表已发布新的 npm 版本。
+
 ## 0.6.4：安装那一半也跳出重载事务
 
 0.6.2 只修了卸载方向，真实环境随即暴露出另一半：**启用/安装本身也是一次 HMR 事务**，所以挂载时「补写缺失预设」的写入同样被 `HMR transactions cannot be nested` 拒绝（日志：`access-mode preset check failed — could not write preset "approve-for-me"`）。本版让两个方向共用同一个「事务之外」的写入入口：先 `hmr.executing.exit(...)` 再调 `configEditor.edit()`，此时写入会**排队等当前重载结束**而不是失败；第一次尝试不再预先等待（避免无谓推迟菜单出现），后续重试覆盖「行在重载中被替换」。对应新增两条回归测试：挂载发生在事务内时写入必须成功；无法跳出时必须明确报失败。

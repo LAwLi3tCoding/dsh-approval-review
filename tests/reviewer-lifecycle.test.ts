@@ -106,6 +106,8 @@ describe('bounded reviewer lifecycle', () => {
   it('disposes a child that appears after the start deadline', async () => {
     let finishStart!: (run: SubagentRun) => void
     let disposed = false
+    let markDisposed!: () => void
+    const disposal = new Promise<void>(resolve => { markDisposed = resolve })
     const ctx = new Context()
     const stub: SubagentStarter = { start: () => new Promise(resolve => { finishStart = resolve }) }
     ctx.provide('subagents', stub as never)
@@ -114,8 +116,8 @@ describe('bounded reviewer lifecycle', () => {
       reviewerProvider: 'spawn', reviewerTools: ['read'], timeoutMs: 20, evidence,
     })
     expect(result.failure).toContain('timed out')
-    finishStart({ id: 'late-child', result: new Promise(() => {}), dispose: async () => { disposed = true } })
-    await Promise.resolve()
+    finishStart({ id: 'late-child', result: new Promise(() => {}), dispose: async () => { disposed = true; markDisposed() } })
+    await disposal
     expect(disposed).toBe(true)
   })
 
