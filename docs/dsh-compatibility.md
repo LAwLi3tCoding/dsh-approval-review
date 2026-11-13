@@ -1,23 +1,32 @@
 # DSH compatibility
 
-The current development target is **DSH 0.2.2-rc.1**, the official npm `latest`
-and `next` version checked on 2026-11-09. The DSH development dependencies are
-pinned to that release so tests exercise its actual APIs. Zod is pinned to the
-host's 4.4.3 version to avoid incompatible schema types from a second version.
+The current development target is **DSH 0.2.2-rc.2**, the official npm `next`
+version checked on 2026-11-13 (`latest` was still 0.2.2-rc.1). The DSH
+development dependencies are pinned to that release so tests exercise its actual
+APIs. The development Zod pin follows that host's 4.6.6 version to avoid
+incompatible schema types from a second version.
 
-Zod is also a required runtime peer at **4.4.3**. The shipped host bundle imports
-it directly, so a development-only declaration is not enough for an isolated
-installation. It remains external and is not added as a separate direct
+Zod is also a required runtime peer at **`^4.4.3`**. The shipped host bundle
+imports it directly, so a development-only declaration is not enough for an
+isolated installation. It remains external and is not added as a separate direct
 dependency. Hosts with automatic peer installation disabled must provide this
 peer explicitly in the profile's dependency environment.
 
-The peer declaration alone does not guarantee one physical copy. DSH 0.2.1-rc.2
-and 0.2.2-rc.1 depend on Zod 4.4.3 and share the plugin's resolved package in the
-strict-install smoke test. The older 0.1.5-rc.3 host allows `^4.4.3` and can
-resolve a newer nested Zod. Both the mixed layout and an explicit top-level
-`zod: "4.4.3"` provider are tested; the latter shares one package in the tested
-installation. The projection boundary uses each schema's own validation method,
-so the mixed layout is not assumed to be an identity conflict.
+DSH 0.2.2-rc.2 moved its own Zod from 4.4.3 to 4.6.6. The previous exact `4.4.3`
+peer made a strict install of that host add a second Zod copy for the plugin, and
+an exact `4.4.3 || 4.6.6` union failed the older host's strict install, because
+that host resolves a newer Zod through its own `^4.4.3`. The caret peer accepts
+whichever compatible Zod the host provides. In the strict-install smoke test the
+plugin shares one Zod package with DSH 0.2.2-rc.2 (4.6.6), 0.2.2-rc.1 and
+0.2.1-rc.2 (4.4.3), and 0.1.5-rc.3, both with its transitive newer Zod and with
+an explicit top-level `zod: "4.4.3"` provider. The projection boundary uses each
+schema's own validation method, so a mixed layout is not assumed to be an
+identity conflict either.
+
+DSH 0.2.2-rc.2 also added `@deepseek-ai/dsh-error` (peer of `dsh-llm`) and
+`@deepseek-ai/dsh-attachment` (peer of `dsh-commands`); both are development
+dependencies only. The plugin does not import them, and its runtime peers are
+unchanged.
 
 The existing older-host peer ranges are retained. The newer clauses admit the
 0.2.1 and 0.2.2 prerelease lines with ordinary npm semantics. Their upper bound
@@ -67,7 +76,7 @@ release. Restart DSH after installing an updated plugin build.
 `pnpm test:package` additionally builds and packs the plugin, installs it in
 fresh isolated dependency fixtures with no hoisting and strict peer checks,
 and verifies import plus the real host's projection registration/validation.
-It covers 0.2.2-rc.1, 0.2.1-rc.2, and both older-host Zod layouts described above.
+It covers 0.2.2-rc.2, 0.2.2-rc.1, 0.2.1-rc.2, and both older-host Zod layouts described above.
 It needs registry access and pnpm, but runs no dependency install scripts or
 live model calls. Set `PNPM_STORE_DIR` if the default pnpm store is unavailable.
 To reproduce a packaging regression with an existing tarball, run
@@ -75,8 +84,8 @@ To reproduce a packaging regression with an existing tarball, run
 
 ## Upstream contracts
 
-- [Official 0.2.2-rc.1 source](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.2-rc.1)
-- [Compatibility evaluator](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.1/packages/boot/app-boot/src/plugin-compatibility.ts)
-- [Subagent activation service](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.1/packages/subagent/subagent/src/index.ts)
-- [Subagent manager](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.1/packages/subagent/subagent/src/manager.ts)
-- [Message source and tool-result shapes](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.1/packages/llm/llm/src/message.ts)
+- [Official 0.2.2-rc.2 source](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.2-rc.2)
+- [Compatibility evaluator](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.2/packages/boot/app-boot/src/plugin-compatibility.ts)
+- [Subagent activation service](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.2/packages/subagent/subagent/src/index.ts)
+- [Subagent manager](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.2/packages/subagent/subagent/src/manager.ts)
+- [Message source and tool-result shapes](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.2/packages/llm/llm/src/message.ts)

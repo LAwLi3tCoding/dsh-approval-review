@@ -43,9 +43,9 @@ describe('published host dependencies', () => {
     }
   })
 
-  it('uses the reviewed host Zod version without installing a separate direct dependency', () => {
-    expect(manifest.peerDependencies.zod).toBe('4.4.3')
-    expect(manifest.devDependencies.zod).toBe('4.4.3')
+  it('uses the reviewed host Zod versions without installing a separate direct dependency', () => {
+    expect(manifest.peerDependencies.zod).toBe('^4.4.3')
+    expect(manifest.devDependencies.zod).toBe('4.6.6')
     expect(manifest.dependencies.zod).toBeUndefined()
   })
 })
