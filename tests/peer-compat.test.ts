@@ -13,7 +13,7 @@ import { satisfies } from 'semver'
 import { describe, expect, it } from 'vitest'
 
 /** DSH runtimes this package claims to load on. Widen a peer range before adding a version. */
-const SUPPORTED_DSH_VERSIONS = ['0.1.5-rc.2', '0.1.7-rc.2', '0.2.0-rc.2', '0.2.1-alpha.5', '0.2.1-rc.2', '0.2.1-rc.5', '0.2.2-rc.1']
+const SUPPORTED_DSH_VERSIONS = ['0.1.5-rc.2', '0.1.7-rc.2', '0.2.0-rc.2', '0.2.1-alpha.5', '0.2.1-rc.2', '0.2.1-rc.5', '0.2.2-rc.1', '0.2.2-rc.2']
 
 /** The line this package must not claim yet: a new minor needs its own review. */
 const UNSUPPORTED_DSH_VERSIONS = ['0.1.2-alpha.1', '0.3.0-0', '0.3.0-alpha.1', '0.3.0-beta.1', '0.3.0-rc.1', '0.3.0', '1.0.0']
@@ -43,8 +43,8 @@ describe('dsh peer compatibility', () => {
 
   it('develops and tests against the latest reviewed host, including npm prerelease semantics', () => {
     for (const [name, range] of dshPeers) {
-      expect(manifest.devDependencies[name]).toBe('0.2.2-rc.1')
-      expect(satisfies('0.2.2-rc.1', range), `${name} rejects the tested prerelease in npm`).toBe(true)
+      expect(manifest.devDependencies[name]).toBe('0.2.2-rc.2')
+      expect(satisfies('0.2.2-rc.2', range), `${name} rejects the tested prerelease in npm`).toBe(true)
     }
   })
 

@@ -12,11 +12,12 @@ const run = (command, args, cwd) => execFileSync(command, args, {
   cwd, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024,
 })
 const cases = [
-  { version: '0.2.2-rc.1', cordis: '4.1.0', schemastery: '3.19.0', explicit: false, shared: true },
-  { version: '0.2.1-rc.2', cordis: '4.0.5', schemastery: '3.18.5', explicit: false, shared: true },
-  // This old host permits newer Zod transitively. Check both valid layouts.
-  { version: '0.1.5-rc.3', cordis: '4.0.2', schemastery: '3.18.2', explicit: false, shared: false },
-  { version: '0.1.5-rc.3', cordis: '4.0.2', schemastery: '3.18.2', explicit: true, shared: true },
+  { version: '0.2.2-rc.2', cordis: '4.1.0', schemastery: '3.19.0', zod: '4.6.6', explicit: false, shared: true },
+  { version: '0.2.2-rc.1', cordis: '4.1.0', schemastery: '3.19.0', zod: '4.4.3', explicit: false, shared: true },
+  { version: '0.2.1-rc.2', cordis: '4.0.5', schemastery: '3.18.5', zod: '4.4.3', explicit: false, shared: true },
+  // This old host permits newer Zod transitively; the caret peer shares it. Also check an explicit 4.4.3 provider.
+  { version: '0.1.5-rc.3', cordis: '4.0.2', schemastery: '3.18.2', zod: 'any', explicit: false, shared: true },
+  { version: '0.1.5-rc.3', cordis: '4.0.2', schemastery: '3.18.2', zod: '4.4.3', explicit: true, shared: true },
 ]
 const probe = `
 import assert from 'node:assert/strict';
@@ -32,7 +33,7 @@ const require = createRequire(import.meta.url);
 const pluginRequire = createRequire(require.resolve('dsh-approval-review'));
 const hostRequire = createRequire(require.resolve('@deepseek-ai/dsh-session-projection'));
 const shared = pluginRequire.resolve('zod') === hostRequire.resolve('zod');
-assert.equal(pluginRequire('zod/package.json').version, '4.4.3');
+if (process.argv[3] !== 'any') assert.equal(pluginRequire('zod/package.json').version, process.argv[3]);
 if (process.argv[2] === 'shared') assert.equal(shared, true, 'expected the host-provided Zod instance');
 const ctx = new Context();
 try {
@@ -70,7 +71,7 @@ try {
       .map(name => [name, name.startsWith('@deepseek-ai/dsh-')
         ? entry.version : name === '@deepseek-ai/cordis' ? entry.cordis : entry.schemastery]))
     dependencies[manifest.name] = `file:${tarball}`
-    if (entry.explicit) dependencies.zod = '4.4.3'
+    if (entry.explicit) dependencies.zod = entry.zod
     writeFileSync(join(cwd, 'package.json'), JSON.stringify({ private: true, type: 'module', dependencies }, null, 2))
     writeFileSync(join(cwd, 'pnpm-workspace.yaml'),
       'nodeLinker: isolated\nhoist: false\nstrictPeerDependencies: true\nautoInstallPeers: true\n')
@@ -78,7 +79,7 @@ try {
     run('pnpm', ['install', '--ignore-scripts', '--no-hoist', '--strict-peer-dependencies',
       ...process.env.PNPM_STORE_DIR ? ['--store-dir', process.env.PNPM_STORE_DIR] : [],
     ], cwd)
-    console.log(run(process.execPath, ['probe.mjs', entry.shared ? 'shared' : 'compatible'], cwd).trim())
+    console.log(run(process.execPath, ['probe.mjs', entry.shared ? 'shared' : 'compatible', entry.zod], cwd).trim())
   }
   rmSync(work, { recursive: true, force: true })
 } catch (error) {
